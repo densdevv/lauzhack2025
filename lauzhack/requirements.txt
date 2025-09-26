@@ -1,24 +1,24 @@
 # Swiss Weather Intelligence System - Dependencies
 # LauzHack 2025 - Judge Evaluation Ready
 
-# Core Web Framework
+# CORE WEB FRAMEWORK (Install first for faster initial load)
 streamlit>=1.28.0
 
-# Data Processing
+# DATA PROCESSING (Essential)
 pandas>=2.0.0
 numpy>=1.24.0
 
-# Visualization
-matplotlib>=3.7.0
+# VISUALIZATION (Main dashboard)
 plotly>=5.15.0
-seaborn>=0.12.0
 
-# HTTP Requests
+# HTTP REQUESTS (Weather data)
 requests>=2.31.0
 
-# Scientific Computing
+# ADVANCED ML & ANALYTICS (Full functionality)
 scipy>=1.10.0
 scikit-learn>=1.3.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
 
 # Optional: Enhanced Performance
 # uvloop>=0.17.0  # Uncomment for faster async operations (Linux/Mac only)

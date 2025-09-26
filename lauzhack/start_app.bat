@@ -17,6 +17,8 @@ echo    • Pure ML-based predictions (no hard-coded limits)
 echo    • Data-driven extreme weather forecasting
 echo    • Professional-grade user experience
 echo.
+echo ⚡ OPTIMIZED: Dependencies installed in optimal order for faster startup
+echo.
 echo.
 echo 🔧 Checking Python virtual environment...
 if not exist ".venv\Scripts\python.exe" (
@@ -27,7 +29,13 @@ if not exist ".venv\Scripts\python.exe" (
 
 echo.
 echo 📦 Installing required dependencies...
-.venv\Scripts\pip.exe install streamlit pandas numpy matplotlib plotly seaborn requests scipy scikit-learn
+echo.
+echo 📦 Installing required dependencies (optimized order)...
+echo    • Installing core libraries first for faster initial load...
+
+.venv\Scripts\pip.exe install streamlit pandas numpy plotly requests
+echo    • Installing advanced ML libraries...
+.venv\Scripts\pip.exe install scipy scikit-learn matplotlib seaborn
 
 echo.
 echo 🌐 Starting Streamlit Web Application...
