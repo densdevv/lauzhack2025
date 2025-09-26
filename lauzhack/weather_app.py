@@ -2996,6 +2996,21 @@ class WeatherDashboard:
         elapsed_sim_minutes = elapsed_real_seconds * (acceleration / 60)  # Convert acceleration to minutes per second
         return st.session_state.simulation_start_time + timedelta(minutes=elapsed_sim_minutes)
     
+    def render_footer(self):
+        """Render a simple, subtle footer with team information."""
+        st.markdown("")  # Add some space
+        st.markdown("")
+        
+        # Simple, subtle footer text
+        st.markdown(
+            """
+            <div style="text-align: center; color: #888888; font-size: 14px; margin-top: 2rem;">
+                Created with ♥ by Bias & Variance (Ömer Yanık and Deniz Hönigs) for Swiss {ai} Weeks 2025 Lausanne Hackathon
+            </div>
+            """, 
+            unsafe_allow_html=True
+        )
+    
     def run_dashboard(self):
         """Main dashboard execution with continuous auto-refresh."""
         import time
@@ -3048,6 +3063,9 @@ class WeatherDashboard:
             
         else:
             st.error("❌ Unable to load weather data. Please check your connection.")
+        
+        # Add footer
+        self.render_footer()
         
         # Auto-refresh mechanism for continuous updates
         if st.session_state.simulation_active:
