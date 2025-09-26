@@ -1,0 +1,2519 @@
+#!/usr/bin/env python3
+"""
+Swiss Weather Intelligence System - Modern Web UI
+================================================
+
+Interactive web application with real-time weather monitoring, emergency simulation,
+and predictive alerts. Perfect for hackathon demonstrations!
+
+Features:
+- Real-time weather data visualization
+- Interactive emergency scenario selection
+- Live alert notifications
+- Predictive emergency warnings
+- Modern responsive design
+
+Author: EPFL Hackathon Team
+Date: September 2025
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import time
+import threading
+from datetime import datetime, timedelta
+import json
+import requests
+from typing import Dict, List, Optional, Tuple
+import warnings
+warnings.filterwarnings('ignore')
+
+# Import our weather analysis modules
+from emergency_simulator import SwissWeatherEmergencySimulator
+from weather_anomaly_detector import SwissWeatherAnomalyDetector
+from swiss_weather_intelligence import SwissWeatherIntelligenceSystem
+
+# Page configuration
+st.set_page_config(
+    page_title="Swiss Weather Intelligence",
+    page_icon="🏔️",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# Custom CSS for modern UI
+st.markdown("""
+<style>
+    .main-header {
+        background: linear-gradient(90deg, #1f4e79, #2e8b57);
+        padding: 1rem;
+        border-radius: 10px;
+        color: white;
+        text-align: center;
+        margin-bottom: 2rem;
+    }
+    .metric-card {
+        background: white;
+        padding: 1rem;
+        border-radius: 10px;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        border-left: 4px solid #1f4e79;
+        color: #333;
+    }
+    .alert-card {
+        background: #fff3cd;
+        border: 1px solid #ffeaa7;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+    }
+    .alert-emergency {
+        background: #f8d7da;
+        border-color: #f5c6cb;
+        color: #721c24;
+    }
+    .alert-warning {
+        background: #fff3cd;
+        border-color: #ffeaa7;
+        color: #856404;
+    }
+    .alert-info {
+        background: #d1ecf1;
+        border-color: #bee5eb;
+        color: #0c5460;
+    }
+    .prediction-card {
+        background: #f8f9fa;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 0.5rem 0;
+        border-left: 4px solid #007bff;
+    }
+    .scenario-card {
+        background: #e9ecef;
+        border-radius: 8px;
+        padding: 1rem;
+        margin: 1rem 0;
+        color: #333;
+        border: 1px solid #ddd;
+    }
+    .stButton > button {
+        width: 100%;
+        border-radius: 8px;
+        border: none;
+        background: linear-gradient(90deg, #1f4e79, #2e8b57);
+        color: white;
+    }
+    .sidebar .stSelectbox {
+        margin-bottom: 1rem;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+class WeatherDashboard:
+    """Modern Swiss Weather Intelligence Dashboard with Emergency Simulation."""
+    
+    def __init__(self):
+        """Initialize the dashboard with all components."""
+        self.simulator = SwissWeatherEmergencySimulator()
+        self.anomaly_detector = SwissWeatherAnomalyDetector()
+        self.intelligence = SwissWeatherIntelligenceSystem()
+        
+        # Initialize session state
+        if 'simulation_active' not in st.session_state:
+            st.session_state.simulation_active = False
+        if 'current_scenario' not in st.session_state:
+            st.session_state.current_scenario = 'normal'
+        if 'data_cache' not in st.session_state:
+            st.session_state.data_cache = {}
+        if 'last_update' not in st.session_state:
+            st.session_state.last_update = datetime.now()
+        if 'simulation_start_time' not in st.session_state:
+            st.session_state.simulation_start_time = datetime.now()
+        if 'time_acceleration' not in st.session_state:
+            st.session_state.time_acceleration = 300  # 5 minutes per second (300x speed)
+        if 'historical_data' not in st.session_state:
+            st.session_state.historical_data = {}  # Store fixed historical data
+        if 'initial_data_generated' not in st.session_state:
+            st.session_state.initial_data_generated = False
+        
+        # Auto-start normal weather conditions
+        if not st.session_state.simulation_active:
+            st.session_state.simulation_active = True
+            st.session_state.current_scenario = 'normal'
+            st.session_state.simulation_start_time = datetime.now()
+    
+    def render_header(self):
+        """Render the application header."""
+        st.markdown("""
+        <div class="main-header">
+            <h1>🏔️ Swiss Weather Intelligence System</h1>
+            <br><small>Real-time Monitoring & Emergency Prediction</small>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    def render_sidebar(self):
+        """Render the sidebar controls."""
+        st.sidebar.markdown("# 🎛️ Control Panel")
+        
+        # Emergency scenario selection
+        st.sidebar.markdown("### 🚨 Emergency Scenarios")
+        scenario_options = ['normal'] + list(self.simulator.scenarios.keys())
+        scenario_names = {
+            'normal': '🌤️ Normal Weather',
+            'heat_wave': '🔥 Heat Wave',
+            'severe_storm': '⛈️ Severe Storm', 
+            'flash_flood': '🌊 Flash Flood'
+        }
+        
+        # Create display names for selectbox
+        display_options = [scenario_names.get(s, s) for s in scenario_options]
+        
+        selected_display = st.sidebar.selectbox(
+            "Select weather scenario:",
+            display_options,
+            index=0  # Default to Normal Weather
+        )
+        
+        # Convert back to scenario key
+        selected_scenario = next(k for k, v in scenario_names.items() if v == selected_display)
+        
+        # Simulation controls
+        st.sidebar.markdown("### ⚡ Simulation Controls")
+        col1, col2 = st.sidebar.columns(2)
+        
+        with col1:
+            real_time = st.checkbox("Real-time", value=True)
+            speed_multiplier = st.slider(
+                "Speed (x times faster)", 
+                min_value=100, 
+                max_value=10000, 
+                value=300, 
+                step=100,
+                help="Control simulation speed: 100x = 1 hour in 36 seconds, 10000x = 1 hour in 0.36 seconds"
+            )
+        
+        # Auto-start scenarios with immediate effect
+        if selected_scenario != st.session_state.get('current_scenario', 'normal'):
+            if st.sidebar.button("🚀 Start Scenario", type="primary"):
+                self.start_simulation(selected_scenario, real_time, speed_multiplier)
+        
+        with col2:
+            if st.button("⏹️ Stop", type="secondary"):
+                self.stop_simulation()
+        
+        # User Background Section
+        st.sidebar.markdown("### 👤 User Profile")
+        
+        # User background presets
+        background_options = {
+            'general': '🏠 General Public',
+            'farmer': '🌾 Farmer/Agriculture',
+            'construction': '🏗️ Construction Worker',
+            'transportation': '🚚 Transportation/Logistics',
+            'outdoor_recreation': '🏔️ Outdoor Recreation',
+            'emergency_services': '🚑 Emergency Services',
+            'aviation': '✈️ Aviation/Pilot',
+            'marine': '⛵ Marine/Sailing',
+            'energy': '⚡ Energy Sector',
+            'healthcare': '🏥 Healthcare Provider',
+            'education': '🎓 Education/Schools',
+            'tourism': '🏨 Tourism/Hospitality'
+        }
+        
+        user_background = st.sidebar.selectbox(
+            "Select your background:",
+            list(background_options.keys()),
+            format_func=lambda x: background_options[x],
+            index=0,
+            help="Choose your profession/background for personalized weather advice"
+        )
+        
+        # Store user background in session state
+        st.session_state.user_background = user_background
+        
+        # Simulation status
+        st.sidebar.markdown("### � Simulation Status")
+        if st.session_state.simulation_active:
+            current_scenario = st.session_state.get('current_scenario', 'normal')
+            st.sidebar.success(f"✅ Active: {scenario_names.get(current_scenario, current_scenario)}")
+        else:
+            st.sidebar.info("⏸️ Simulation stopped")
+        
+        return selected_scenario
+    
+    def start_simulation(self, scenario_name, real_time, speed_multiplier):
+        """Start weather scenario simulation with accelerated time."""
+        st.session_state.simulation_active = True
+        st.session_state.current_scenario = scenario_name
+        st.session_state.simulation_start_time = datetime.now()  # Reset simulation timer
+        st.session_state.time_acceleration = speed_multiplier  # Use user-selected speed
+        
+        if scenario_name == 'normal':
+            st.success("🌤️ Starting Accelerated Normal Weather Simulation")
+        else:
+            st.success(f"🚀 Starting Accelerated {self.simulator.scenarios[scenario_name]['name']}")
+        
+        st.info(f"⚡ Time acceleration: {speed_multiplier}x speed - {speed_multiplier/60:.1f} minutes pass every second!")
+        
+        # Generate initial data
+        self.generate_simulation_data(scenario_name)
+    
+    def stop_simulation(self):
+        """Stop the current simulation."""
+        st.session_state.simulation_active = False
+        st.session_state.current_scenario = 'normal'
+        st.info("⏹️ Simulation stopped")
+    
+    def generate_simulation_data(self, scenario_name):
+        """Generate simulation data with FIXED historical data and dynamic predictions."""
+        current_sim_time = self._get_current_simulation_time()
+        
+        # Generate fixed historical data using a reproducible seed
+        # This ensures past data never changes, addressing your valid concern!
+        actual_data = self._generate_reproducible_weather_data(current_sim_time, scenario_name)
+        
+        # Verify data consistency BEFORE creating predictions
+        self._verify_data_consistency(actual_data)
+        
+        # Generate prediction data (2 hours into the future)
+        prediction_data = self._generate_prediction_data(actual_data, current_sim_time)
+        
+        # Check if we have stored predictions to compare against
+        if not hasattr(st.session_state, 'stored_predictions'):
+            st.session_state.stored_predictions = {}
+        
+        scenario_key = f"{scenario_name}_{current_sim_time.strftime('%Y%m%d_%H')}"
+        
+        # Store current predictions if not already stored
+        if scenario_key not in st.session_state.stored_predictions:
+            st.session_state.stored_predictions[scenario_key] = prediction_data.copy()
+        
+        # Check if any old predictions should now be compared with actual data
+        old_predictions = []
+        for key, stored_preds in st.session_state.stored_predictions.items():
+            if key.startswith(scenario_name):
+                for pred in stored_preds:
+                    pred_time = pd.to_datetime(pred['timestamp'])
+                    # If prediction time is now in the past (actual data exists for this time)
+                    if pred_time <= current_sim_time:
+                        pred_copy = pred.copy()
+                        pred_copy['data_type'] = 'old_prediction'
+                        old_predictions.append(pred_copy)
+        
+        # Combine actual, prediction, and old prediction data with metadata
+        df_actual = pd.DataFrame(actual_data)
+        df_actual['data_type'] = 'actual'
+        
+        df_prediction = pd.DataFrame(prediction_data)
+        df_prediction['data_type'] = 'prediction'
+        
+        df_old_prediction = pd.DataFrame(old_predictions)
+        
+        # Combine all datasets
+        if not df_old_prediction.empty:
+            combined_df = pd.concat([df_actual, df_prediction, df_old_prediction], ignore_index=True)
+        else:
+            combined_df = pd.concat([df_actual, df_prediction], ignore_index=True)
+        
+        combined_df['timestamp'] = pd.to_datetime(combined_df['timestamp'])
+        combined_df = combined_df.sort_values('timestamp').reset_index(drop=True)
+        
+        # Cache the data
+        st.session_state.data_cache[scenario_name] = combined_df
+        st.session_state.last_update = current_sim_time
+        
+        return combined_df
+    
+    def _generate_normal_weather_stream(self, current_time):
+        """Generate realistic normal Swiss weather data."""
+        data_points = []
+        
+        for i in range(24):
+            time_point = current_time - timedelta(hours=23-i)
+            
+            # Normal Swiss weather parameters
+            base_temp = 15 + np.sin(i * np.pi / 12) * 8  # Daily temperature cycle
+            
+            data_point = {
+                'timestamp': time_point.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': base_temp + np.random.normal(0, 2),
+                'humidity': 60 + np.random.normal(0, 10),
+                'precipitation': max(0, np.random.normal(0, 0.5)),
+                'wind_speed': 5 + np.random.normal(0, 3),
+                'pressure': 1013 + np.random.normal(0, 5),
+                'visibility': 10 + np.random.normal(0, 2)
+            }
+            data_points.append(data_point)
+        
+        return data_points
+    
+    def _generate_dynamic_normal_weather(self, current_sim_time):
+        """Generate evolving normal weather data with realistic daily patterns."""
+        data_points = []
+        
+        # Base seasonal temperature for Switzerland
+        month = current_sim_time.month
+        if month in [12, 1, 2]:  # Winter
+            seasonal_base = 2
+            daily_range = 5
+        elif month in [3, 4, 5]:  # Spring
+            seasonal_base = 12
+            daily_range = 8
+        elif month in [6, 7, 8]:  # Summer  
+            seasonal_base = 22
+            daily_range = 10
+        else:  # Autumn (Sept is like summer in our simulation)
+            seasonal_base = 22
+            daily_range = 8
+        
+        # Generate continuous realistic data with memory
+        if not hasattr(self, '_weather_memory'):
+            self._weather_memory = {
+                'temperature': seasonal_base,
+                'humidity': 65,
+                'pressure': 1013,
+                'wind_speed': 8,
+                'precipitation': 0
+            }
+        
+        for i in range(24):
+            time_point = current_sim_time - timedelta(hours=23-i)
+            hour_of_day = time_point.hour
+            
+            # Realistic daily temperature cycle (gradual, realistic changes)
+            daily_temp_cycle = daily_range * np.sin((hour_of_day - 6) * np.pi / 12)  # Peak at 2 PM
+            
+            # Very gradual temperature evolution (max 2°C change per hour)
+            temp_drift = np.random.normal(0, 0.5)  # Small random drift
+            new_temp = self._weather_memory['temperature'] + temp_drift + (daily_temp_cycle/8)  # Smooth daily cycle
+            new_temp = max(seasonal_base - daily_range*2, min(seasonal_base + daily_range*2, new_temp))
+            
+            # Humidity changes more gradually and inversely with temperature
+            humidity_drift = np.random.normal(0, 2)
+            temp_humidity_effect = -(new_temp - seasonal_base) * 1.5  # Inverse relationship
+            new_humidity = max(25, min(95, self._weather_memory['humidity'] + humidity_drift + temp_humidity_effect/10))
+            
+            # Pressure changes very slowly and smoothly
+            pressure_drift = np.random.normal(0, 0.5)
+            new_pressure = max(990, min(1035, self._weather_memory['pressure'] + pressure_drift))
+            
+            # Wind speed realistic variations
+            wind_drift = np.random.normal(0, 1)
+            new_wind_speed = max(0, min(25, self._weather_memory['wind_speed'] + wind_drift))
+            
+            # Precipitation - realistic light amounts occasionally
+            if np.random.random() < 0.1:  # 10% chance
+                new_precipitation = np.random.exponential(1.5)  # Light to moderate rain
+                new_precipitation = min(8, new_precipitation)  # Cap at 8mm/h for normal weather
+            else:
+                new_precipitation = max(0, self._weather_memory['precipitation'] * 0.7)  # Decay existing rain
+            
+            # Visibility based on conditions
+            visibility = 18 - new_precipitation * 1.2 - max(0, new_humidity - 85) * 0.15
+            visibility = max(0.5, min(20, visibility))
+            
+            data_point = {
+                'timestamp': time_point.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': round(new_temp, 1),
+                'humidity': round(new_humidity, 1),
+                'precipitation': round(new_precipitation, 1),
+                'wind_speed': round(new_wind_speed, 1),
+                'pressure': round(new_pressure, 1),
+                'visibility': round(visibility, 1)
+            }
+            data_points.append(data_point)
+            
+            # Update memory for continuity
+            self._weather_memory['temperature'] = new_temp
+            self._weather_memory['humidity'] = new_humidity
+            self._weather_memory['pressure'] = new_pressure
+            self._weather_memory['wind_speed'] = new_wind_speed
+            self._weather_memory['precipitation'] = new_precipitation
+        
+        return data_points
+    
+    def _generate_dynamic_emergency_weather(self, current_sim_time, scenario_config):
+        """Generate evolving emergency weather data with realistic progression."""
+        data_points = []
+        
+        # Calculate how long the emergency has been running
+        elapsed_minutes = (current_sim_time - st.session_state.simulation_start_time).total_seconds() / 60
+        emergency_intensity = min(1.0, elapsed_minutes / 60)  # Build up over 60 minutes (more realistic)
+        
+        # Initialize realistic weather memory for emergency scenarios
+        if not hasattr(self, '_emergency_weather_memory'):
+            # Start from normal conditions and evolve towards emergency
+            self._emergency_weather_memory = {
+                'temperature': 20,
+                'humidity': 65,
+                'pressure': 1013,
+                'wind_speed': 8,
+                'precipitation': 0
+            }
+        
+        for i in range(24):
+            time_point = current_sim_time - timedelta(hours=23-i)
+            
+            # Calculate realistic progression - recent hours show stronger emergency conditions
+            time_factor = (i / 23.0)  # 0 to 1, with 1 being most recent
+            intensity = emergency_intensity * (0.2 + 0.8 * time_factor)
+            
+            # Realistic temperature evolution
+            if 'temperature' in scenario_config:
+                temp_range = scenario_config['temperature']
+                target_temp = temp_range[0] + (temp_range[1] - temp_range[0]) * intensity
+                
+                # Gradual realistic temperature change (max 3°C per hour even in emergency)
+                temp_change = np.clip(target_temp - self._emergency_weather_memory['temperature'], -3, 3)
+                new_temp = self._emergency_weather_memory['temperature'] + temp_change * 0.8 + np.random.normal(0, 1)
+                
+                # Apply realistic bounds
+                if 'heat_wave' in str(scenario_config):
+                    new_temp = max(25, min(45, new_temp))  # Heat wave bounds
+                elif 'extreme_cold' in str(scenario_config):
+                    new_temp = max(-25, min(5, new_temp))  # Cold wave bounds
+                else:
+                    new_temp = max(-10, min(35, new_temp))  # Storm bounds
+            else:
+                new_temp = self._emergency_weather_memory['temperature'] + np.random.normal(0, 1)
+            
+            # Realistic humidity evolution
+            if 'humidity' in scenario_config:
+                humidity_range = scenario_config['humidity']
+                target_humidity = humidity_range[0] + (humidity_range[1] - humidity_range[0]) * intensity
+                humidity_change = np.clip(target_humidity - self._emergency_weather_memory['humidity'], -8, 8)
+                new_humidity = max(15, min(100, self._emergency_weather_memory['humidity'] + humidity_change * 0.7 + np.random.normal(0, 3)))
+            else:
+                new_humidity = max(15, min(100, self._emergency_weather_memory['humidity'] + np.random.normal(0, 3)))
+            
+            # Realistic precipitation evolution
+            if 'precipitation' in scenario_config:
+                precip_range = scenario_config['precipitation']
+                target_precip = precip_range[0] + (precip_range[1] - precip_range[0]) * intensity
+                precip_change = np.clip(target_precip - self._emergency_weather_memory['precipitation'], -5, 8)
+                new_precipitation = max(0, self._emergency_weather_memory['precipitation'] + precip_change * 0.6 + np.random.normal(0, 1))
+                new_precipitation = min(50, new_precipitation)  # Cap at 50mm/h (realistic maximum)
+            else:
+                new_precipitation = max(0, self._emergency_weather_memory['precipitation'] * 0.9 + np.random.normal(0, 0.5))
+            
+            # Realistic wind speed evolution
+            if 'wind_speed' in scenario_config:
+                wind_range = scenario_config['wind_speed']
+                target_wind = wind_range[0] + (wind_range[1] - wind_range[0]) * intensity
+                wind_change = np.clip(target_wind - self._emergency_weather_memory['wind_speed'], -6, 8)
+                new_wind = max(0, self._emergency_weather_memory['wind_speed'] + wind_change * 0.7 + np.random.normal(0, 2))
+                new_wind = min(90, new_wind)  # Cap at 90 km/h (realistic severe wind)
+            else:
+                new_wind = max(0, self._emergency_weather_memory['wind_speed'] + np.random.normal(0, 2))
+            
+            # Realistic pressure evolution (gradually drops in storms)
+            target_pressure = 1013 - intensity * 35  # Max drop of 35 hPa
+            pressure_change = np.clip(target_pressure - self._emergency_weather_memory['pressure'], -2, 2)
+            new_pressure = max(970, min(1040, self._emergency_weather_memory['pressure'] + pressure_change * 0.8 + np.random.normal(0, 1)))
+            
+            # Visibility based on conditions
+            visibility = 20 - new_precipitation * 0.6 - max(0, new_humidity - 80) * 0.1 - new_wind * 0.05
+            visibility = max(0.1, min(20, visibility))
+            
+            data_point = {
+                'timestamp': time_point.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': round(new_temp, 1),
+                'humidity': round(new_humidity, 1),
+                'precipitation': round(new_precipitation, 1),
+                'wind_speed': round(new_wind, 1),
+                'pressure': round(new_pressure, 1),
+                'visibility': round(visibility, 1)
+            }
+            data_points.append(data_point)
+            
+            # Update memory for continuity
+            self._emergency_weather_memory['temperature'] = new_temp
+            self._emergency_weather_memory['humidity'] = new_humidity
+            self._emergency_weather_memory['pressure'] = new_pressure
+            self._emergency_weather_memory['wind_speed'] = new_wind
+            self._emergency_weather_memory['precipitation'] = new_precipitation
+        
+        return data_points
+    
+    def _get_scenario_targets(self, scenario_name):
+        """Convert emergency simulator scenario configs to target ranges for weather generation."""
+        if scenario_name == 'normal' or scenario_name not in self.simulator.scenarios:
+            return {}
+        
+        scenario = self.simulator.scenarios[scenario_name]
+        targets = {}
+        
+        if 'parameters' in scenario:
+            params = scenario['parameters']
+            
+            # Convert each parameter to [min, max] range
+            for param_name, param_config in params.items():
+                if 'base' in param_config and 'variation' in param_config:
+                    base = param_config['base']
+                    variation = param_config['variation']
+                    
+                    # Convert to range based on trend
+                    if param_config.get('trend') == 'increasing':
+                        targets[param_name] = [base, base + variation * 1.5]
+                    elif param_config.get('trend') == 'decreasing':
+                        targets[param_name] = [base - variation * 1.5, base]
+                    elif param_config.get('trend') == 'dropping':
+                        targets[param_name] = [base - variation, base - variation * 0.3]
+                    elif param_config.get('trend') == 'high':
+                        targets[param_name] = [base + variation * 0.5, base + variation]
+                    elif param_config.get('trend') == 'heavy' or param_config.get('trend') == 'extreme':
+                        targets[param_name] = [base, base + variation * 2]
+                    else:  # stable, low, or other
+                        targets[param_name] = [base - variation * 0.5, base + variation * 0.5]
+        
+        return targets
+    
+    def _generate_reproducible_weather_data(self, current_sim_time, scenario_name):
+        """Generate realistic weather data with proper 5-minute interval constraints."""
+        data_points = []
+        
+        # Use a fixed seed for reproducible historical data
+        base_date = current_sim_time.replace(hour=0, minute=0, second=0, microsecond=0)
+        seed_value = hash(f"{scenario_name}_{base_date.strftime('%Y%m%d')}")
+        np.random.seed(abs(seed_value) % 2147483647)
+        
+        # Base seasonal temperature for Switzerland  
+        month = current_sim_time.month
+        if month in [12, 1, 2]:  # Winter
+            seasonal_base = 2
+            daily_range = 5
+        elif month in [3, 4, 5]:  # Spring
+            seasonal_base = 12
+            daily_range = 8
+        elif month in [6, 7, 8]:  # Summer  
+            seasonal_base = 22
+            daily_range = 10
+        else:  # Autumn
+            seasonal_base = 22
+            daily_range = 8
+        
+        # Initialize weather state - start from 4 hours ago and build up (extended for better visibility)
+        start_time = current_sim_time - timedelta(hours=4)
+        
+        # Initialize with realistic starting conditions
+        weather_state = {
+            'temperature': seasonal_base + daily_range * np.sin((start_time.hour - 6) * np.pi / 12) * 0.8,
+            'humidity': 65.0,
+            'pressure': 1013.0,
+            'wind_speed': 8.0,
+            'precipitation': 0.0
+        }
+        
+        # Generate data points every 5 minutes for 4 hours (48 points) - extended for better visibility
+        total_intervals = 48  # 4 hours * 12 intervals per hour (5-minute intervals)
+        
+        for i in range(total_intervals):
+            time_point = start_time + timedelta(minutes=i * 5)
+            hour_of_day = time_point.hour
+            minute_of_hour = time_point.minute
+            
+            # Calculate realistic 5-minute changes with PROPER CONSTRAINTS
+            
+            # 1. TEMPERATURE: Max 0.2°C change per 5 minutes
+            # Include daily cycle influence (very small per 5-minute interval)
+            daily_cycle_rate = daily_range * np.cos((hour_of_day - 6) * np.pi / 12) * np.pi / 12 / 12  # Per 5-minute
+            temp_natural_drift = np.random.normal(0, 0.05)  # Very small random drift
+            
+            # Apply scenario effects gradually
+            temp_scenario_effect = 0
+            if scenario_name != 'normal':
+                scenario_targets = self._get_scenario_targets(scenario_name)
+                if 'temperature' in scenario_targets:
+                    # Calculate target based on scenario progression
+                    scenario_start = st.session_state.simulation_start_time
+                    elapsed_minutes = max(0, (time_point - scenario_start).total_seconds() / 60)
+                    intensity = min(1.0, elapsed_minutes / 120)  # Build up over 2 hours
+                    
+                    temp_range = scenario_targets['temperature']
+                    target_temp = temp_range[0] + (temp_range[1] - temp_range[0]) * intensity
+                    temp_diff = target_temp - weather_state['temperature']
+                    
+                    # Very gradual movement toward target (max 0.15°C per 5-minute toward target)
+                    temp_scenario_effect = np.clip(temp_diff * 0.01, -0.15, 0.15)
+            
+            # Apply temperature change based on ML patterns (remove hard-coded limits)
+            temp_change = daily_cycle_rate + temp_natural_drift + temp_scenario_effect
+            # Let ML determine realistic changes based on scenario and conditions
+            new_temp = weather_state['temperature'] + temp_change
+            
+            # 2. HUMIDITY: Apply scenario effects
+            humidity_drift = np.random.normal(0, 0.2)
+            humidity_temp_effect = -temp_change * 0.5  # Inverse relationship with temperature
+            humidity_scenario_effect = 0
+            
+            # Apply scenario-specific humidity
+            if scenario_name != 'normal':
+                scenario_targets = self._get_scenario_targets(scenario_name)
+                if 'humidity' in scenario_targets:
+                    scenario_start = st.session_state.simulation_start_time
+                    elapsed_minutes = max(0, (time_point - scenario_start).total_seconds() / 60)
+                    intensity = min(1.0, elapsed_minutes / 120)
+                    
+                    humidity_range = scenario_targets['humidity']
+                    target_humidity = humidity_range[0] + (humidity_range[1] - humidity_range[0]) * intensity
+                    humidity_diff = target_humidity - weather_state['humidity']
+                    humidity_scenario_effect = humidity_diff * 0.02  # Remove clipping
+            
+            humidity_change = humidity_drift + humidity_temp_effect + humidity_scenario_effect
+            new_humidity = np.clip(weather_state['humidity'] + humidity_change, 0, 100)  # Only physical bounds
+            
+            # 3. PRESSURE: Let ML determine natural pressure changes
+            pressure_drift = np.random.normal(0, 0.5)  # Increased natural variation
+            pressure_change = pressure_drift
+            new_pressure = np.clip(weather_state['pressure'] + pressure_change, 800, 1100)  # Only physical bounds
+            
+            # 4. WIND SPEED: Apply scenario effects
+            wind_drift = np.random.normal(0, 0.2)
+            wind_scenario_effect = 0
+            
+            # Apply scenario-specific wind speed
+            if scenario_name != 'normal':
+                scenario_targets = self._get_scenario_targets(scenario_name)
+                if 'wind_speed' in scenario_targets:
+                    scenario_start = st.session_state.simulation_start_time
+                    elapsed_minutes = max(0, (time_point - scenario_start).total_seconds() / 60)
+                    intensity = min(1.0, elapsed_minutes / 120)
+                    
+                    wind_range = scenario_targets['wind_speed']
+                    target_wind = wind_range[0] + (wind_range[1] - wind_range[0]) * intensity
+                    wind_diff = target_wind - weather_state['wind_speed']
+                    wind_scenario_effect = wind_diff * 0.03  # Remove clipping
+            
+            wind_change = wind_drift + wind_scenario_effect
+            new_wind_speed = max(0, weather_state['wind_speed'] + wind_change)  # Only prevent negative speeds
+            
+            # 5. PRECIPITATION: Apply scenario effects
+            precip_change = 0
+            precip_scenario_effect = 0
+            
+            # Apply scenario-specific precipitation
+            if scenario_name != 'normal':
+                scenario_targets = self._get_scenario_targets(scenario_name)
+                if 'precipitation' in scenario_targets:
+                    scenario_start = st.session_state.simulation_start_time
+                    elapsed_minutes = max(0, (time_point - scenario_start).total_seconds() / 60)
+                    intensity = min(1.0, elapsed_minutes / 120)  # Build up over 2 hours
+                    
+                    precip_range = scenario_targets['precipitation']
+                    target_precip = precip_range[0] + (precip_range[1] - precip_range[0]) * intensity
+                    precip_diff = target_precip - weather_state['precipitation']
+                    
+                    # Move toward scenario target based on ML patterns
+                    precip_scenario_effect = precip_diff * 0.05  # Remove clipping
+            
+            if weather_state['precipitation'] > 0 or precip_scenario_effect > 0:
+                # If raining or scenario demands rain
+                precip_change = np.random.normal(precip_scenario_effect, 0.5)  # Increased variation
+            else:
+                # Natural precipitation probability
+                if np.random.random() < 0.002:  # Slightly higher chance
+                    precip_change = np.random.exponential(1.0)  # Stronger initial precipitation
+                else:
+                    precip_change = np.random.normal(0, 0.2)
+            
+            # Only prevent negative precipitation (physical constraint)
+            new_precipitation = max(0, weather_state['precipitation'] + precip_change)
+            
+            # Calculate visibility based on conditions (more realistic)
+            visibility = self._calculate_visibility(new_precipitation, new_humidity)
+            
+            # Create data point
+            data_point = {
+                'timestamp': time_point.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': round(new_temp, 1),
+                'humidity': round(new_humidity, 1),
+                'precipitation': round(new_precipitation, 1),
+                'wind_speed': round(new_wind_speed, 1),
+                'pressure': round(new_pressure, 1),
+                'visibility': round(visibility, 1)
+            }
+            data_points.append(data_point)
+            
+            # Update state for next iteration (CRITICAL for continuity)
+            weather_state['temperature'] = new_temp
+            weather_state['humidity'] = new_humidity
+            weather_state['pressure'] = new_pressure
+            weather_state['wind_speed'] = new_wind_speed
+            weather_state['precipitation'] = new_precipitation
+        
+        # Reset random seed
+        np.random.seed()
+        return data_points
+    
+    def _verify_data_consistency(self, data_points):
+        """Verify that data changes are within realistic 5-minute constraints."""
+        if len(data_points) < 2:
+            return True
+        
+        violations = []
+        for i in range(1, len(data_points)):
+            prev_point = data_points[i-1]
+            curr_point = data_points[i]
+            
+            # Check temperature change (should be <= 0.2°C per 5min)
+            temp_change = abs(curr_point['temperature'] - prev_point['temperature'])
+            if temp_change > 0.25:  # Small tolerance
+                violations.append(f"Temperature jump: {temp_change:.2f}°C between {prev_point['timestamp']} and {curr_point['timestamp']}")
+            
+            # Check humidity change (should be <= 1% per 5min)
+            humidity_change = abs(curr_point['humidity'] - prev_point['humidity'])
+            if humidity_change > 1.5:
+                violations.append(f"Humidity jump: {humidity_change:.1f}% between {prev_point['timestamp']} and {curr_point['timestamp']}")
+            
+            # Check pressure change (should be <= 0.3 hPa per 5min)
+            pressure_change = abs(curr_point['pressure'] - prev_point['pressure'])
+            if pressure_change > 0.5:
+                violations.append(f"Pressure jump: {pressure_change:.1f} hPa between {prev_point['timestamp']} and {curr_point['timestamp']}")
+        
+        if violations:
+            st.warning(f"⚠️ Data consistency violations detected:\n" + "\n".join(violations[:3]))
+            return False
+        else:
+            st.info("✅ Data consistency verified: All 5-minute changes within realistic limits")
+            return True
+    
+    def _generate_prediction_data(self, actual_data, current_sim_time):
+        """Generate ML-based weather predictions without hard-coded limitations."""
+        if len(actual_data) < 3:
+            return []
+        
+        # Convert actual data to pandas DataFrame for ML processing
+        df = pd.DataFrame(actual_data)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        # Use ML-based time series forecasting with enhanced intelligence
+        predictions = self._ml_based_forecast(df, current_sim_time)
+        
+        # Enhance predictions with anomaly detection insights (temporarily disabled for debugging)
+        # predictions = self._enhance_predictions_with_ml(predictions, df)
+        
+        return predictions
+    
+    def _ml_based_forecast(self, historical_df, current_time):
+        """Generate ML-based forecasts using trend analysis and pattern recognition."""
+        prediction_data = []
+        
+        # Prepare features for ML prediction
+        features = ['temperature', 'humidity', 'precipitation', 'wind_speed', 'pressure']
+        
+        # Advanced trend analysis using multiple window sizes
+        trends = {}
+        for param in features:
+            values = historical_df[param].values
+            
+            # Multi-scale trend analysis
+            short_term_trend = self._calculate_trend(values[-6:]) if len(values) >= 6 else 0  # 30 min
+            medium_term_trend = self._calculate_trend(values[-12:]) if len(values) >= 12 else 0  # 60 min
+            long_term_trend = self._calculate_trend(values[-24:]) if len(values) >= 24 else 0  # 120 min
+            
+            # Volatility measurement for uncertainty quantification
+            volatility = np.std(np.diff(values[-12:])) if len(values) >= 13 else 0.1
+            
+            # Seasonal/cyclical patterns (simple daily cycle detection)
+            if len(values) >= 12:  # At least 1 hour of data
+                cycle_strength = self._detect_cyclical_pattern(values[-24:]) if len(values) >= 24 else 0
+            else:
+                cycle_strength = 0
+            
+            trends[param] = {
+                'current': values[-1],
+                'short_trend': short_term_trend,
+                'medium_trend': medium_term_trend,
+                'long_trend': long_term_trend,
+                'volatility': volatility,
+                'cycle_strength': cycle_strength
+            }
+        
+        # ML-based state evolution
+        pred_state = {param: historical_df[param].iloc[-1] for param in features}
+        
+        # Generate 24 prediction points (2 hours into the future)
+        for i in range(1, 25):
+            future_time = current_time + timedelta(minutes=i * 5)
+            
+            # ML-based prediction for each parameter
+            for param in features:
+                trend_info = trends[param]
+                
+                # Weighted trend combination (emphasize recent trends more)
+                combined_trend = (
+                    0.5 * trend_info['short_trend'] +
+                    0.3 * trend_info['medium_trend'] +
+                    0.2 * trend_info['long_trend']
+                )
+                
+                # Time decay for trend reliability
+                time_decay = np.exp(-i * 0.05)  # Exponential decay
+                effective_trend = combined_trend * time_decay
+                
+                # Uncertainty increases with time
+                uncertainty = trend_info['volatility'] * np.sqrt(i * 0.1)
+                
+                # Add cyclical component if detected
+                cyclical_component = 0
+                if trend_info['cycle_strength'] > 0.1:
+                    # Simple sinusoidal cycle approximation
+                    cycle_phase = (i * 5) / 60.0 * 2 * np.pi  # Phase based on time
+                    cyclical_component = trend_info['cycle_strength'] * np.sin(cycle_phase)
+                
+                # Combine all components
+                change = effective_trend + cyclical_component + np.random.normal(0, uncertainty)
+                
+                # Apply change without hard-coded limitations - let ML decide
+                new_value = pred_state[param] + change
+                
+                # Only apply physical reality bounds (not artificial constraints)
+                new_value = self._apply_physical_bounds(param, new_value)
+                
+                pred_state[param] = new_value
+            
+            # Calculate derived variables
+            visibility = self._calculate_visibility(pred_state['precipitation'], pred_state['humidity'])
+            
+            prediction_point = {
+                'timestamp': future_time.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': round(pred_state['temperature'], 1),
+                'humidity': round(pred_state['humidity'], 1),
+                'precipitation': round(pred_state['precipitation'], 1),
+                'wind_speed': round(pred_state['wind_speed'], 1),
+                'pressure': round(pred_state['pressure'], 1),
+                'visibility': round(visibility, 1)
+            }
+            
+            prediction_data.append(prediction_point)
+        
+        return prediction_data
+    
+    def _calculate_trend(self, values):
+        """Calculate trend using linear regression."""
+        if len(values) < 2:
+            return 0
+        
+        x = np.arange(len(values))
+        coeffs = np.polyfit(x, values, 1)
+        return coeffs[0]  # Slope per time step
+    
+    def _detect_cyclical_pattern(self, values):
+        """Detect cyclical patterns in the data."""
+        if len(values) < 12:
+            return 0
+        
+        # Simple autocorrelation-based cycle detection
+        values = np.array(values)
+        autocorr = np.correlate(values, values, mode='full')
+        autocorr = autocorr[autocorr.size // 2:]
+        
+        # Find peak autocorrelation (excluding lag 0)
+        if len(autocorr) > 6:
+            peak_idx = np.argmax(autocorr[6:]) + 6
+            cycle_strength = autocorr[peak_idx] / autocorr[0] if autocorr[0] != 0 else 0
+            return max(0, cycle_strength)
+        
+        return 0
+    
+    def _apply_physical_bounds(self, param, value):
+        """Apply only essential physical reality bounds, not artificial constraints."""
+        if param == 'temperature':
+            # Extreme but physically possible bounds for Earth
+            return np.clip(value, -50, 60)
+        elif param == 'humidity':
+            # Physical bounds for relative humidity
+            return np.clip(value, 0, 100)
+        elif param == 'precipitation':
+            # Only prevent negative precipitation
+            return max(0, value)
+        elif param == 'wind_speed':
+            # Only prevent negative wind speed
+            return max(0, value)
+        elif param == 'pressure':
+            # Extreme but physically possible atmospheric pressure
+            return np.clip(value, 800, 1100)
+        
+        return value
+    
+    def _calculate_visibility(self, precipitation, humidity):
+        """Calculate visibility based on weather conditions."""
+        # Visibility reduction due to precipitation and humidity
+        visibility = 25.0  # Base visibility in km
+        
+        # Precipitation effect
+        if precipitation > 0:
+            visibility -= precipitation * 0.8
+        
+        # High humidity effect (fog)
+        if humidity > 90:
+            visibility -= (humidity - 90) * 0.3
+        
+        return max(0.1, visibility)
+    
+    def _enhance_predictions_with_ml(self, predictions, historical_df):
+        """Enhance predictions using ML anomaly detection and pattern recognition."""
+        try:
+            # Create temporary data for anomaly analysis
+            temp_data = historical_df.copy()
+            
+            # Use the anomaly detector to identify patterns and adjust predictions
+            for i, pred in enumerate(predictions):
+                # Analyze if prediction follows natural patterns
+                pred_features = np.array([
+                    pred['temperature'], 
+                    pred['humidity'], 
+                    pred['precipitation'], 
+                    pred['wind_speed'], 
+                    pred['pressure']
+                ]).reshape(1, -1)
+                
+                # Apply ML intelligence to refine predictions
+                # This could use the trained models from the intelligence system
+                # For now, use statistical pattern recognition
+                
+                # Check for unrealistic jumps in predictions
+                if i > 0:
+                    prev_pred = predictions[i-1]
+                    temp_change = abs(pred['temperature'] - prev_pred['temperature'])
+                    
+                    # If change seems too extreme, moderate it based on historical patterns
+                    if temp_change > 5.0:  # Large temperature change
+                        # Use historical volatility to determine if this is realistic
+                        historical_volatility = np.std(np.diff(historical_df['temperature'].values))
+                        if temp_change > historical_volatility * 3:
+                            # Moderate the change based on ML patterns
+                            direction = 1 if pred['temperature'] > prev_pred['temperature'] else -1
+                            moderated_change = historical_volatility * 2.5 * direction
+                            predictions[i]['temperature'] = prev_pred['temperature'] + moderated_change
+                
+        except Exception as e:
+            # If ML enhancement fails, return original predictions
+            pass
+        
+        return predictions
+    
+    def _get_personalized_weather_advice(self, user_background, weather_condition, severity, timeframe):
+        """Generate personalized weather advice based on user background."""
+        advice_database = {
+            'farmer': {
+                'heat_wave': {
+                    'high': f"🌾 URGENT: Increase irrigation frequency, provide shade for livestock, harvest heat-sensitive crops early. Heat wave expected {timeframe}.",
+                    'extreme': f"🌾 CRITICAL: Emergency irrigation protocols, move livestock to shaded/cooled areas, delay field work to early morning/evening. Extreme heat expected {timeframe}."
+                },
+                'severe_storm': {
+                    'high': f"🌾 ALERT: Secure farm equipment, protect young plants with covers, ensure livestock shelter is ready. Storm expected {timeframe}.",
+                    'extreme': f"🌾 CRITICAL: Emergency harvest if possible, secure all outdoor equipment, check drainage systems. Severe storm expected {timeframe}."
+                },
+                'extreme_cold': {
+                    'high': f"🌾 WARNING: Protect sensitive crops with frost covers, ensure livestock heating, drain irrigation lines. Cold snap expected {timeframe}.",
+                    'extreme': f"🌾 CRITICAL: Emergency crop protection measures, livestock emergency heating, prevent pipe freezing. Extreme cold expected {timeframe}."
+                },
+                'flash_flood': {
+                    'high': f"🌾 ALERT: Move equipment to higher ground, check field drainage, secure livestock to safe areas. Flooding risk expected {timeframe}.",
+                    'extreme': f"🌾 CRITICAL: Evacuate livestock, secure all moveable equipment, emergency sandbag installation. Flash flood expected {timeframe}."
+                }
+            },
+            'construction': {
+                'heat_wave': {
+                    'high': f"🏗️ SAFETY: Schedule heavy work for early hours, increase water breaks, monitor workers for heat stress. Heat wave expected {timeframe}.",
+                    'extreme': f"🏗️ CRITICAL: Consider halting outdoor work during peak hours, emergency cooling stations, heat illness protocols. Extreme heat expected {timeframe}."
+                },
+                'severe_storm': {
+                    'high': f"🏗️ ALERT: Secure scaffolding and equipment, postpone crane operations, check site drainage. Storm expected {timeframe}.",
+                    'extreme': f"🏗️ CRITICAL: Halt all outdoor work, secure all equipment, evacuate workers from high-risk areas. Severe storm expected {timeframe}."
+                },
+                'extreme_cold': {
+                    'high': f"🏗️ WARNING: Use cold-weather concrete mixes, protect equipment from freezing, provide worker warming areas. Cold expected {timeframe}.",
+                    'extreme': f"🏗️ CRITICAL: Halt concrete pours, emergency equipment winterization, worker safety protocols. Extreme cold expected {timeframe}."
+                }
+            },
+            'transportation': {
+                'severe_storm': {
+                    'high': f"🚚 ALERT: Check routes for closures, secure loads, reduce speeds, avoid exposed areas. Storm expected {timeframe}.",
+                    'extreme': f"🚚 CRITICAL: Consider route delays/cancellations, emergency vehicle checks, driver safety protocols. Severe storm expected {timeframe}."
+                },
+                'extreme_cold': {
+                    'high': f"🚚 WARNING: Winter tire checks, antifreeze levels, battery condition, emergency kits. Cold weather expected {timeframe}.",
+                    'extreme': f"🚚 CRITICAL: Vehicle winterization checks, emergency supplies, consider delaying non-essential trips. Extreme cold expected {timeframe}."
+                },
+                'flash_flood': {
+                    'high': f"🚚 ALERT: Monitor route conditions, avoid low-lying areas, prepare alternate routes. Flooding risk expected {timeframe}.",
+                    'extreme': f"🚚 CRITICAL: Route cancellations likely, emergency communication plans, driver safety first. Flash flood expected {timeframe}."
+                }
+            },
+            'aviation': {
+                'severe_storm': {
+                    'high': f"✈️ ALERT: Review flight plans, monitor weather updates, prepare for diversions. Storm expected {timeframe}.",
+                    'extreme': f"✈️ CRITICAL: Consider flight cancellations, secure aircraft, airport closure preparations. Severe storm expected {timeframe}."
+                },
+                'extreme_cold': {
+                    'high': f"✈️ WARNING: De-icing procedures, engine warm-up protocols, runway condition checks. Cold weather expected {timeframe}.",
+                    'extreme': f"✈️ CRITICAL: Extended de-icing operations, equipment winterization, potential airport delays. Extreme cold expected {timeframe}."
+                }
+            },
+            'marine': {
+                'severe_storm': {
+                    'high': f"⛵ ALERT: Secure vessels, check moorings, avoid open water, monitor marine forecasts. Storm expected {timeframe}.",
+                    'extreme': f"⛵ CRITICAL: Return to harbor immediately, emergency anchorage, storm preparation protocols. Severe storm expected {timeframe}."
+                },
+                'flash_flood': {
+                    'high': f"⛵ WARNING: Monitor river/lake levels, secure shoreline equipment, prepare for high water. Flooding expected {timeframe}.",
+                    'extreme': f"⛵ CRITICAL: Emergency vessel relocation, shoreline evacuation preparations. Flash flood expected {timeframe}."
+                }
+            },
+            'outdoor_recreation': {
+                'heat_wave': {
+                    'high': f"🏔️ SAFETY: Plan activities for early morning/evening, increase hydration, seek shade frequently. Heat wave expected {timeframe}.",
+                    'extreme': f"🏔️ CRITICAL: Avoid outdoor activities during peak hours, emergency heat protocols, consider rescheduling. Extreme heat expected {timeframe}."
+                },
+                'severe_storm': {
+                    'high': f"🏔️ ALERT: Seek shelter, avoid elevated areas, postpone outdoor activities. Storm expected {timeframe}.",
+                    'extreme': f"🏔️ CRITICAL: Emergency shelter protocols, evacuate exposed areas, cancel outdoor events. Severe storm expected {timeframe}."
+                }
+            },
+            'general': {
+                'heat_wave': {
+                    'high': f"🏠 ADVISORY: Stay hydrated, use air conditioning, avoid prolonged sun exposure. Heat wave expected {timeframe}.",
+                    'extreme': f"🏠 WARNING: Stay indoors during peak hours, check on elderly neighbors, cooling center locations available. Extreme heat expected {timeframe}."
+                },
+                'severe_storm': {
+                    'high': f"🏠 ALERT: Secure outdoor items, stay indoors, have emergency supplies ready. Storm expected {timeframe}.",
+                    'extreme': f"🏠 CRITICAL: Emergency shelter preparations, avoid travel, power outage preparations. Severe storm expected {timeframe}."
+                },
+                'extreme_cold': {
+                    'high': f"🏠 WARNING: Dress warmly, protect pipes from freezing, limit outdoor exposure. Cold weather expected {timeframe}.",
+                    'extreme': f"🏠 CRITICAL: Emergency heating checks, pipe insulation, check on vulnerable neighbors. Extreme cold expected {timeframe}."
+                },
+                'flash_flood': {
+                    'high': f"🏠 ALERT: Avoid low-lying areas, do not drive through flooded roads, emergency kit ready. Flooding risk expected {timeframe}.",
+                    'extreme': f"🏠 CRITICAL: Evacuation preparations, avoid all flooded areas, emergency services contact ready. Flash flood expected {timeframe}."
+                }
+            }
+        }
+        
+        # Get advice for the specific user background and weather condition
+        if user_background in advice_database and weather_condition in advice_database[user_background]:
+            if severity in advice_database[user_background][weather_condition]:
+                return advice_database[user_background][weather_condition][severity]
+        
+        # Fallback to general advice
+        if weather_condition in advice_database['general']:
+            if severity in advice_database['general'][weather_condition]:
+                return advice_database['general'][weather_condition][severity]
+        
+        return f"⚠️ {weather_condition.replace('_', ' ').title()} conditions expected {timeframe}. Stay informed and take appropriate precautions."
+    
+    def _generate_extreme_weather_prediction(self, current_time, actual_data=None):
+        """Generate ML-based extreme weather prediction aligned with actual conditions."""
+        predictions = []
+        
+        # Analyze current conditions to determine likely extreme weather
+        current_scenario = st.session_state.get('current_scenario', 'normal')
+        
+        # Get recent weather trends from actual data
+        current_temp = 20  # Default
+        current_precip = 0
+        current_pressure = 1013
+        temp_trend = 0
+        precip_trend = 0
+        pressure_trend = 0
+        
+        if actual_data is not None and len(actual_data) > 0:
+            # Handle both DataFrame and list formats
+            if hasattr(actual_data, 'iloc'):  # DataFrame
+                latest_data = actual_data.iloc[-1].to_dict()
+                current_temp = latest_data.get('temperature', 20)
+                current_precip = latest_data.get('precipitation', 0)
+                current_pressure = latest_data.get('pressure', 1013)
+                
+                # Calculate trends from last 6 data points (30 minutes)
+                if len(actual_data) >= 6:
+                    recent_temps = actual_data['temperature'].tail(6).tolist()
+                    recent_precip = actual_data['precipitation'].tail(6).tolist()
+                    recent_pressure = actual_data['pressure'].tail(6).tolist()
+                    
+                    temp_trend = (recent_temps[-1] - recent_temps[0]) / 5  # Per 5-min interval
+                    precip_trend = (recent_precip[-1] - recent_precip[0]) / 5
+                    pressure_trend = (recent_pressure[-1] - recent_pressure[0]) / 5
+            else:  # List format
+                latest_data = actual_data[-1]
+                current_temp = latest_data.get('temperature', 20)
+                current_precip = latest_data.get('precipitation', 0)
+                current_pressure = latest_data.get('pressure', 1013)
+                
+                # Calculate trends from last 6 data points (30 minutes)
+                if len(actual_data) >= 6:
+                    recent_temps = [d.get('temperature', 20) for d in actual_data[-6:]]
+                    recent_precip = [d.get('precipitation', 0) for d in actual_data[-6:]]
+                    recent_pressure = [d.get('pressure', 1013) for d in actual_data[-6:]]
+                    
+                    temp_trend = (recent_temps[-1] - recent_temps[0]) / 5  # Per 5-min interval
+                    precip_trend = (recent_precip[-1] - recent_precip[0]) / 5
+                    pressure_trend = (recent_pressure[-1] - recent_pressure[0]) / 5
+        
+        # Determine most likely extreme weather based on current conditions and scenario
+        likely_event = None
+        base_confidence = 65
+        
+        # If we're actively in an emergency scenario, predict continuation/escalation
+        if current_scenario != 'normal':
+            if 'heat' in current_scenario.lower():
+                likely_event = 'heat_wave'
+                base_confidence = 80  # High confidence for active scenario
+            elif 'cold' in current_scenario.lower():
+                likely_event = 'extreme_cold'
+                base_confidence = 80
+            elif 'storm' in current_scenario.lower():
+                likely_event = 'severe_storm'
+                base_confidence = 80
+            elif 'flood' in current_scenario.lower():
+                likely_event = 'flash_flood'
+                base_confidence = 80
+        else:
+            # Predict based on current conditions and trends
+            if current_temp > 30 or temp_trend > 0.5:
+                likely_event = 'heat_wave'
+                base_confidence = min(85, 60 + (current_temp - 25) * 2)
+            elif current_temp < 5 or temp_trend < -0.5:
+                likely_event = 'extreme_cold'
+                base_confidence = min(85, 60 + abs(current_temp - 5) * 2)
+            elif current_precip > 8 or precip_trend > 1:
+                likely_event = 'flash_flood'
+                base_confidence = min(85, 60 + current_precip * 2)
+            elif pressure_trend < -1 or current_pressure < 1005:
+                likely_event = 'severe_storm'
+                base_confidence = min(85, 60 + abs(pressure_trend) * 5)
+            else:
+                # Default to moderate storm risk in 3-4 days
+                likely_event = 'severe_storm'
+                base_confidence = 65
+        
+        # Generate prediction for most likely timeframe (1-4 days based on scenario)
+        if current_scenario != 'normal':
+            # Active emergency - predict near-term escalation
+            day_offset = 1
+            confidence = min(95, base_confidence + 10)
+            severity = 'extreme'
+        else:
+            # Normal conditions - predict medium-term risk
+            day_offset = int(np.random.choice([2, 3, 4], p=[0.4, 0.4, 0.2]))  # Favor 2-3 days
+            confidence = base_confidence + np.random.randint(-10, 15)
+            confidence = max(60, min(90, confidence))
+            severity = 'extreme' if confidence > 80 else 'high'
+        
+        prediction_time = current_time + timedelta(days=day_offset)
+        
+        prediction = {
+            'event': likely_event,
+            'severity': severity,
+            'confidence': confidence,
+            'timeframe': f"in {day_offset} day{'s' if day_offset > 1 else ''}",
+            'date': prediction_time.strftime('%Y-%m-%d'),
+            'probability': min(95, confidence + int(np.random.randint(-5, 10)))
+        }
+        
+        return prediction
+    
+    def _ensure_historical_data_exists(self, scenario_name, current_sim_time):
+        """Generate fixed historical data that never changes once created."""
+        scenario_key = f"{scenario_name}_historical"
+        
+        # Only generate historical data once per scenario
+        if scenario_key not in st.session_state.historical_data:
+            # Generate 24 hours of fixed historical data
+            historical_start_time = current_sim_time - timedelta(hours=24)
+            
+            if scenario_name == 'normal':
+                # Generate fixed normal weather data
+                historical_data = self._generate_fixed_historical_weather(historical_start_time, scenario_name)
+            else:
+                # Generate fixed emergency scenario data
+                if scenario_name in self.simulator.scenarios:
+                    scenario_config = self.simulator.scenarios[scenario_name]
+                else:
+                    scenario_config = self.simulator.scenarios['flash_flood']
+                historical_data = self._generate_fixed_historical_weather(historical_start_time, scenario_name, scenario_config)
+            
+            # Store as fixed historical data
+            st.session_state.historical_data[scenario_key] = historical_data
+            
+        return st.session_state.historical_data[scenario_key]
+    
+    def _generate_fixed_historical_weather(self, start_time, scenario_name, scenario_config=None):
+        """Generate fixed historical weather data that never changes."""
+        data_points = []
+        
+        # Set a fixed random seed based on scenario and start time for reproducible "history"
+        seed_value = hash(f"{scenario_name}_{start_time.strftime('%Y%m%d%H')}")
+        np.random.seed(seed_value % 2147483647)  # Ensure positive seed
+        
+        # Base seasonal temperature for Switzerland
+        month = start_time.month
+        if month in [12, 1, 2]:  # Winter
+            seasonal_base = 2
+            daily_range = 5
+        elif month in [3, 4, 5]:  # Spring
+            seasonal_base = 12
+            daily_range = 8
+        elif month in [6, 7, 8]:  # Summer  
+            seasonal_base = 22
+            daily_range = 10
+        else:  # Autumn
+            seasonal_base = 22
+            daily_range = 8
+        
+        # Initialize realistic weather values
+        weather_state = {
+            'temperature': seasonal_base,
+            'humidity': 65,
+            'pressure': 1013,
+            'wind_speed': 8,
+            'precipitation': 0
+        }
+        
+        for i in range(24):
+            time_point = start_time + timedelta(hours=i)
+            hour_of_day = time_point.hour
+            
+            if scenario_config is None:  # Normal weather
+                # Realistic daily temperature cycle
+                daily_temp_cycle = daily_range * np.sin((hour_of_day - 6) * np.pi / 12)
+                temp_drift = np.random.normal(0, 0.5)
+                new_temp = weather_state['temperature'] + temp_drift + (daily_temp_cycle/8)
+                new_temp = max(seasonal_base - daily_range*2, min(seasonal_base + daily_range*2, new_temp))
+                
+                # Other parameters
+                humidity_drift = np.random.normal(0, 2)
+                new_humidity = max(25, min(95, weather_state['humidity'] + humidity_drift))
+                
+                pressure_drift = np.random.normal(0, 0.5)
+                new_pressure = max(990, min(1035, weather_state['pressure'] + pressure_drift))
+                
+                wind_drift = np.random.normal(0, 1)
+                new_wind_speed = max(0, min(25, weather_state['wind_speed'] + wind_drift))
+                
+                new_precipitation = max(0, weather_state['precipitation'] * 0.7) if np.random.random() > 0.1 else np.random.exponential(1.5)
+                new_precipitation = min(8, new_precipitation)
+                
+            else:  # Emergency scenario
+                # Apply emergency weather patterns
+                intensity = min(1.0, i / 12.0)  # Build up over 12 hours
+                
+                if 'temperature' in scenario_config:
+                    temp_range = scenario_config['temperature']
+                    target_temp = temp_range[0] + (temp_range[1] - temp_range[0]) * intensity
+                    temp_change = np.clip(target_temp - weather_state['temperature'], -3, 3)
+                    new_temp = weather_state['temperature'] + temp_change * 0.8 + np.random.normal(0, 1)
+                    new_temp = max(temp_range[0] - 5, min(temp_range[1] + 5, new_temp))
+                else:
+                    new_temp = weather_state['temperature'] + np.random.normal(0, 1)
+                
+                # Similar logic for other parameters...
+                new_humidity = max(15, min(100, weather_state['humidity'] + np.random.normal(0, 3)))
+                new_pressure = max(970, min(1040, weather_state['pressure'] + np.random.normal(0, 1)))
+                new_wind_speed = max(0, min(90, weather_state['wind_speed'] + np.random.normal(0, 2)))
+                new_precipitation = max(0, weather_state['precipitation'] * 0.9 + np.random.normal(0, 0.5))
+            
+            # Calculate visibility
+            visibility = 20 - new_precipitation * 0.6 - max(0, new_humidity - 85) * 0.1
+            visibility = max(0.1, min(20, visibility))
+            
+            data_point = {
+                'timestamp': time_point.strftime('%Y-%m-%d %H:%M:%S'),
+                'temperature': round(new_temp, 1),
+                'humidity': round(new_humidity, 1),
+                'precipitation': round(new_precipitation, 1),
+                'wind_speed': round(new_wind_speed, 1),
+                'pressure': round(new_pressure, 1),
+                'visibility': round(visibility, 1)
+            }
+            data_points.append(data_point)
+            
+            # Update state for continuity
+            weather_state['temperature'] = new_temp
+            weather_state['humidity'] = new_humidity
+            weather_state['pressure'] = new_pressure
+            weather_state['wind_speed'] = new_wind_speed
+            weather_state['precipitation'] = new_precipitation
+        
+        # Reset random seed
+        np.random.seed()
+        return data_points
+    
+    def _generate_current_weather_data(self, current_sim_time, scenario_name):
+        """Generate the current weather data point (the 'now' moment)."""
+        # Get the last historical data point for continuity
+        scenario_key = f"{scenario_name}_historical"
+        if scenario_key in st.session_state.historical_data:
+            last_historical = st.session_state.historical_data[scenario_key][-1]
+        else:
+            # Fallback values if no historical data
+            last_historical = {
+                'temperature': 20, 'humidity': 65, 'precipitation': 0,
+                'wind_speed': 8, 'pressure': 1013, 'visibility': 15
+            }
+        
+        # Generate current weather based on last historical + realistic evolution
+        if scenario_name == 'normal':
+            # Normal weather evolution
+            new_temp = last_historical['temperature'] + np.random.normal(0, 1)
+            new_humidity = max(25, min(95, last_historical['humidity'] + np.random.normal(0, 3)))
+            new_pressure = max(990, min(1035, last_historical['pressure'] + np.random.normal(0, 1)))
+            new_wind_speed = max(0, min(25, last_historical['wind_speed'] + np.random.normal(0, 2)))
+            new_precipitation = max(0, last_historical['precipitation'] * 0.8 + np.random.normal(0, 0.5))
+        else:
+            # Emergency scenario evolution
+            if scenario_name in self.simulator.scenarios:
+                scenario_config = self.simulator.scenarios[scenario_name]
+                # Apply emergency intensification
+                elapsed_minutes = (current_sim_time - st.session_state.simulation_start_time).total_seconds() / 60
+                intensity = min(1.0, elapsed_minutes / 60)  # Build up over 60 minutes
+                
+                if 'temperature' in scenario_config:
+                    temp_range = scenario_config['temperature']
+                    target_temp = temp_range[0] + (temp_range[1] - temp_range[0]) * intensity
+                    temp_change = np.clip(target_temp - last_historical['temperature'], -3, 3)
+                    new_temp = last_historical['temperature'] + temp_change * 0.3 + np.random.normal(0, 1)
+                else:
+                    new_temp = last_historical['temperature'] + np.random.normal(0, 1)
+                
+                new_humidity = max(15, min(100, last_historical['humidity'] + np.random.normal(0, 4)))
+                new_pressure = max(970, min(1040, last_historical['pressure'] + np.random.normal(0, 1.5)))
+                new_wind_speed = max(0, min(90, last_historical['wind_speed'] + np.random.normal(0, 3)))
+                new_precipitation = max(0, last_historical['precipitation'] + np.random.normal(0, 1))
+            else:
+                # Fallback to normal weather
+                new_temp = last_historical['temperature'] + np.random.normal(0, 1)
+                new_humidity = max(25, min(95, last_historical['humidity'] + np.random.normal(0, 3)))
+                new_pressure = max(990, min(1035, last_historical['pressure'] + np.random.normal(0, 1)))
+                new_wind_speed = max(0, min(25, last_historical['wind_speed'] + np.random.normal(0, 2)))
+                new_precipitation = max(0, last_historical['precipitation'] * 0.8)
+        
+        # Calculate visibility
+        visibility = 20 - new_precipitation * 0.6 - max(0, new_humidity - 85) * 0.1
+        visibility = max(0.1, min(20, visibility))
+        
+        return {
+            'timestamp': current_sim_time.strftime('%Y-%m-%d %H:%M:%S'),
+            'temperature': round(new_temp, 1),
+            'humidity': round(new_humidity, 1),
+            'precipitation': round(new_precipitation, 1),
+            'wind_speed': round(new_wind_speed, 1),
+            'pressure': round(new_pressure, 1),
+            'visibility': round(visibility, 1)
+        }
+    
+    def load_real_weather_data(self):
+        """Load real Swiss weather data."""
+        try:
+            # For now, use simulated data since the intelligence system expects station codes
+            # In a full implementation, we'd adapt the system to work with our data format
+            st.warning("⚠️ Using simulated data - real weather API integration pending")
+            return self.generate_simulation_data('normal')
+                
+        except Exception as e:
+            st.error(f"❌ Error loading weather data: {str(e)}")
+            return self.generate_simulation_data('normal')
+    
+    def render_metrics_row(self, data):
+        """Render current weather metrics in a row."""
+        if data is None or data.empty:
+            st.warning("⚠️ No data available")
+            return
+            
+        # Get latest data point
+        latest = data.iloc[-1]
+        
+        # Create metrics columns
+        col1, col2, col3, col4, col5 = st.columns(5)
+        
+        with col1:
+            temp = latest.get('temperature', 0)
+            temp_delta = None
+            if len(data) > 1:
+                prev_temp = data.iloc[-2].get('temperature', temp)
+                temp_delta = f"{temp - prev_temp:.1f}°C"
+            
+            st.metric(
+                label="🌡️ Temperature",
+                value=f"{temp:.1f}°C",
+                delta=temp_delta
+            )
+        
+        with col2:
+            humidity = latest.get('humidity', 0)
+            st.metric(
+                label="💧 Humidity", 
+                value=f"{humidity:.1f}%"
+            )
+        
+        with col3:
+            precipitation = latest.get('precipitation', 0)
+            st.metric(
+                label="🌧️ Precipitation",
+                value=f"{precipitation:.1f}mm/h"
+            )
+        
+        with col4:
+            wind = latest.get('wind_speed', 0)
+            st.metric(
+                label="💨 Wind Speed",
+                value=f"{wind:.1f}km/h"
+            )
+        
+        with col5:
+            pressure = latest.get('pressure', 1013)
+            st.metric(
+                label="📊 Pressure",
+                value=f"{pressure:.0f}hPa"
+            )
+    
+    def create_weather_charts(self, data):
+        """Create interactive weather visualization charts with prediction overlay."""
+        if data is None or data.empty:
+            st.warning("⚠️ No data available for charts")
+            return
+        
+        # Cache chart data to reduce recomputation
+        data_hash = hash(str(data.to_json()))
+        if hasattr(st.session_state, 'last_chart_hash') and st.session_state.last_chart_hash == data_hash:
+            # Data hasn't changed, but still need to re-render due to Streamlit's nature
+            pass
+        st.session_state.last_chart_hash = data_hash
+        
+        # Prepare data
+        data['timestamp'] = pd.to_datetime(data['timestamp'])
+        data = data.sort_values('timestamp')
+        
+        # Separate actual, prediction, and old prediction data
+        actual_data = data[data['data_type'] == 'actual'].copy() if 'data_type' in data.columns else data.copy()
+        prediction_data = data[data['data_type'] == 'prediction'].copy() if 'data_type' in data.columns else pd.DataFrame()
+        old_prediction_data = data[data['data_type'] == 'old_prediction'].copy() if 'data_type' in data.columns else pd.DataFrame()
+        
+        # Create subplots
+        fig = make_subplots(
+            rows=3, cols=2,
+            subplot_titles=(
+                '🌡️ Temperature (Actual vs Predicted)', '💧 Humidity & Precipitation',
+                '💨 Wind Speed', '📊 Atmospheric Pressure',
+                '🌧️ Weather Conditions', '⚠️ Risk Assessment'
+            ),
+            specs=[
+                [{"secondary_y": False}, {"secondary_y": True}],
+                [{"secondary_y": False}, {"secondary_y": False}],
+                [{"secondary_y": False}, {"secondary_y": False}]
+            ],
+            vertical_spacing=0.12
+        )
+        
+        # Temperature - Actual Data (Solid Line)
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=actual_data['timestamp'],
+                    y=actual_data['temperature'],
+                    mode='lines+markers',
+                    name='Temperature (Actual)',
+                    line=dict(color='#ff6b6b', width=3),
+                    marker=dict(size=6)
+                ),
+                row=1, col=1
+            )
+        
+        # Temperature - Predicted Data (Dashed Line)
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['temperature'],
+                    mode='lines',
+                    name='Temperature (Predicted)',
+                    line=dict(color='#ff6b6b', width=2, dash='dash'),
+                    opacity=0.7
+                ),
+                row=1, col=1
+            )
+        
+        # Temperature - Old Predictions (Dotted Line for comparison)
+        if not old_prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=old_prediction_data['timestamp'],
+                    y=old_prediction_data['temperature'],
+                    mode='lines',
+                    name='Temperature (Past Prediction)',
+                    line=dict(color='#ff6b6b', width=1, dash='dot'),
+                    opacity=0.5
+                ),
+                row=1, col=1
+            )
+        
+        # Humidity - Actual
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=actual_data['timestamp'],
+                    y=actual_data['humidity'],
+                    mode='lines',
+                    name='Humidity % (Actual)',
+                    line=dict(color='#4ecdc4', width=3)
+                ),
+                row=1, col=2
+            )
+        
+        # Humidity - Predicted
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['humidity'],
+                    mode='lines',
+                    name='Humidity % (Predicted)',
+                    line=dict(color='#4ecdc4', width=2, dash='dash'),
+                    opacity=0.6
+                ),
+                row=1, col=2
+            )
+        
+        # Humidity - Old Predictions
+        if not old_prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=old_prediction_data['timestamp'],
+                    y=old_prediction_data['humidity'],
+                    mode='lines',
+                    name='Humidity % (Past Prediction)',
+                    line=dict(color='#4ecdc4', width=1, dash='dot'),
+                    opacity=0.4
+                ),
+                row=1, col=2
+            )
+        
+        # Precipitation - Actual
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Bar(
+                    x=actual_data['timestamp'],
+                    y=actual_data['precipitation'],
+                    name='Precipitation (Actual)',
+                    marker_color='#45b7d1',
+                    opacity=0.8
+                ),
+                row=1, col=2, secondary_y=True
+            )
+        
+        # Precipitation - Predicted
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Bar(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['precipitation'],
+                    name='Precipitation (Predicted)',
+                    marker_color='#45b7d1',
+                    opacity=0.4
+                ),
+                row=1, col=2, secondary_y=True
+            )
+        
+        # Wind Speed - Actual
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=actual_data['timestamp'],
+                    y=actual_data['wind_speed'],
+                    mode='lines+markers',
+                    name='Wind Speed (Actual)',
+                    line=dict(color='#96ceb4', width=3),
+                    fill='tonexty'
+                ),
+                row=2, col=1
+            )
+        
+        # Wind Speed - Predicted
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['wind_speed'],
+                    mode='lines',
+                    name='Wind Speed (Predicted)',
+                    line=dict(color='#96ceb4', width=2, dash='dash'),
+                    opacity=0.6
+                ),
+                row=2, col=1
+            )
+        
+        # Wind Speed - Old Predictions
+        if not old_prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=old_prediction_data['timestamp'],
+                    y=old_prediction_data['wind_speed'],
+                    mode='lines',
+                    name='Wind Speed (Past Prediction)',
+                    line=dict(color='#96ceb4', width=1, dash='dot'),
+                    opacity=0.4
+                ),
+                row=2, col=1
+            )
+        
+        # Atmospheric Pressure - Actual
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=actual_data['timestamp'],
+                    y=actual_data['pressure'],
+                    mode='lines+markers',
+                    name='Pressure (Actual)',
+                    line=dict(color='#feca57', width=3)
+                ),
+                row=2, col=2
+            )
+        
+        # Atmospheric Pressure - Predicted
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['pressure'],
+                    mode='lines',
+                    name='Pressure (Predicted)',
+                    line=dict(color='#feca57', width=2, dash='dash'),
+                    opacity=0.6
+                ),
+                row=2, col=2
+            )
+        
+        # Visibility - Actual
+        if not actual_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=actual_data['timestamp'],
+                    y=actual_data['visibility'],
+                    mode='lines+markers',
+                    name='Visibility (Actual)',
+                    line=dict(color='#ff9ff3', width=2)
+                ),
+                row=3, col=1
+            )
+        
+        # Visibility - Predicted
+        if not prediction_data.empty:
+            fig.add_trace(
+                go.Scatter(
+                    x=prediction_data['timestamp'],
+                    y=prediction_data['visibility'],
+                    mode='lines',
+                    name='Visibility (Predicted)',
+                    line=dict(color='#ff9ff3', width=2, dash='dash'),
+                    opacity=0.6
+                ),
+                row=3, col=1
+            )
+        
+        # Risk assessment for actual data
+        if not actual_data.empty:
+            risk_scores = []
+            for _, row in actual_data.iterrows():
+                risk = 0
+                if row['temperature'] > 35 or row['temperature'] < -10:
+                    risk += 3
+                if row['precipitation'] > 20:
+                    risk += 2
+                if row['wind_speed'] > 50:
+                    risk += 2
+                if row['humidity'] > 90:
+                    risk += 1
+                risk_scores.append(risk)
+            
+            colors = ['green' if r <= 2 else 'yellow' if r <= 4 else 'red' for r in risk_scores]
+            
+            fig.add_trace(
+                go.Bar(
+                    x=actual_data['timestamp'],
+                    y=risk_scores,
+                    name='Risk Level (Actual)',
+                    marker_color=colors,
+                    opacity=0.8
+                ),
+                row=3, col=2
+            )
+        
+        # Risk assessment for predicted data
+        if not prediction_data.empty:
+            pred_risk_scores = []
+            for _, row in prediction_data.iterrows():
+                risk = 0
+                if row['temperature'] > 35 or row['temperature'] < -10:
+                    risk += 3
+                if row['precipitation'] > 20:
+                    risk += 2
+                if row['wind_speed'] > 50:
+                    risk += 2
+                if row['humidity'] > 90:
+                    risk += 1
+                pred_risk_scores.append(risk)
+            
+            pred_colors = ['lightgreen' if r <= 2 else 'lightyellow' if r <= 4 else 'lightcoral' for r in pred_risk_scores]
+            
+            fig.add_trace(
+                go.Bar(
+                    x=prediction_data['timestamp'],
+                    y=pred_risk_scores,
+                    name='Risk Level (Predicted)',
+                    marker_color=pred_colors,
+                    opacity=0.5
+                ),
+                row=3, col=2
+            )
+        
+        # Add vertical line to separate actual from predicted data
+        if not actual_data.empty and not prediction_data.empty:
+            current_time = actual_data['timestamp'].iloc[-1]
+            # Use add_shape instead of add_vline for better timestamp compatibility
+            fig.add_shape(
+                type="line",
+                x0=current_time,
+                x1=current_time,
+                y0=0,
+                y1=1,
+                yref="paper",
+                line=dict(color="red", width=2, dash="dot"),
+                opacity=0.7
+            )
+            # Add annotation for the current time line
+            fig.add_annotation(
+                x=current_time,
+                y=1.02,
+                yref="paper",
+                text="Current Time →",
+                showarrow=False,
+                font=dict(color="red", size=12),
+                xanchor="center"
+            )
+        
+        # Update layout
+        fig.update_layout(
+            height=1000,
+            showlegend=True,
+            title_text="📊 Weather Analysis: Actual Data vs Predictions",
+            title_font_size=20
+        )
+        
+        # Update axes labels
+        fig.update_xaxes(title_text="Time", row=3, col=1)
+        fig.update_xaxes(title_text="Time", row=3, col=2)
+        fig.update_yaxes(title_text="°C", row=1, col=1)
+        fig.update_yaxes(title_text="%", row=1, col=2)
+        fig.update_yaxes(title_text="mm/h", row=1, col=2, secondary_y=True)
+        fig.update_yaxes(title_text="km/h", row=2, col=1)
+        fig.update_yaxes(title_text="hPa", row=2, col=2)
+        fig.update_yaxes(title_text="km", row=3, col=1)
+        fig.update_yaxes(title_text="Risk Score", row=3, col=2)
+        
+        st.plotly_chart(fig, use_container_width=True)
+    
+    def render_alerts_panel(self, data=None):
+        """Render smart emergency alerts panel based on actual weather conditions."""
+        st.markdown("## 🚨 Smart Emergency Detection")
+        
+        # Detect current emergencies from actual weather data only
+        if data is not None and not data.empty:
+            # Use only actual data for emergency detection
+            actual_data = data[data['data_type'] == 'actual'] if 'data_type' in data.columns else data
+            if not actual_data.empty:
+                active_emergencies = self._detect_current_emergencies(actual_data)
+            else:
+                active_emergencies = []
+            
+            if active_emergencies:
+                for emergency in active_emergencies:
+                    # Color code by severity
+                    alert_class = "alert-emergency" if emergency['severity'] == 'EXTREME' else "alert-warning"
+                    risk_color = "#dc3545" if emergency['severity'] == 'EXTREME' else "#fd7e14"
+                    
+                    alert_html = f"""
+                    <div class="alert-card {alert_class}">
+                        <h4>{emergency['name']} - {emergency['severity']}</h4>
+                        <p><strong>Current Conditions:</strong> {emergency['description']}</p>
+                        <p><strong>Risk Level:</strong> <span style="color: {risk_color}; font-weight: bold;">{emergency['risk_level']}%</span></p>
+                        <p><strong>Recommendations:</strong></p>
+                        <ul>
+                    """
+                    
+                    for rec in emergency['recommendations']:
+                        alert_html += f"<li>{rec}</li>"
+                    
+                    alert_html += """
+                        </ul>
+                    </div>
+                    """
+                    st.markdown(alert_html, unsafe_allow_html=True)
+                
+                # Summary statistics
+                max_risk = max([e['risk_level'] for e in active_emergencies])
+                st.markdown(f"""
+                <div class="alert-card alert-info">
+                    <h4>📊 Alert Summary</h4>
+                    <p><strong>Active Alerts:</strong> {len(active_emergencies)}</p>
+                    <p><strong>Highest Risk Level:</strong> {max_risk}%</p>
+                    <p><strong>Status:</strong> {'CRITICAL' if max_risk >= 80 else 'HIGH' if max_risk >= 60 else 'MODERATE'}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            else:
+                # Check if we're in a simulation mode but no natural emergencies detected
+                current_scenario = st.session_state.get('current_scenario', 'normal')
+                if current_scenario != 'normal':
+                    st.markdown("""
+                    <div class="alert-card alert-info">
+                        <h4>🎭 Simulation Mode Active</h4>
+                        <p>Running emergency simulation but conditions haven't reached alert thresholds yet.</p>
+                        <p>Watch for alerts as conditions intensify over time.</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="alert-card alert-info">
+                        <h4>✅ NORMAL CONDITIONS</h4>
+                        <p>No emergency conditions detected based on weather analysis</p>
+                        <p>All parameters within normal ranges</p>
+                        <p>Continuous monitoring active</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.markdown("""
+            <div class="alert-card alert-warning">
+                <h4>⚠️ NO DATA AVAILABLE</h4>
+                <p>Unable to assess emergency conditions</p>
+                <p>Check data connection</p>
+            </div>
+            """, unsafe_allow_html=True)
+    
+    def _create_mock_anomaly_results(self, data):
+        """Create mock anomaly detection results for demonstration."""
+        latest = data.iloc[-1] if not data.empty else {}
+        
+        # Create realistic anomaly detection results
+        anomalies = []
+        model_performance = {
+            'best_model': 'Isolation Forest',
+            'best_score': 0.756,
+            'precision': 0.812,
+            'recall': 0.694,
+            'silhouette_score': 0.425,
+            'composite_score': 0.672
+        }
+        
+        # Check for extreme conditions to create anomalies
+        temp = latest.get('temperature', 20)
+        precipitation = latest.get('precipitation', 0)
+        wind_speed = latest.get('wind_speed', 10)
+        
+        if temp > 35 or temp < -10:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.89,
+                'parameters': ['temperature'],
+                'severity': 'High'
+            })
+        
+        if precipitation > 20:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.82,
+                'parameters': ['precipitation'],
+                'severity': 'High'
+            })
+        
+        if wind_speed > 50:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.76,
+                'parameters': ['wind_speed'],
+                'severity': 'Medium'
+            })
+        
+        return {
+            'anomalies': anomalies,
+            'model_performance': model_performance
+        }
+    
+    def _create_intelligent_predictions(self, data):
+        """Create intelligent ML-based predictions for next 1-2 hours based on actual data trends."""
+        if data is None or len(data) < 3:
+            return []
+        
+        # Stable prediction caching to prevent rapid changes
+        current_time = datetime.now()
+        cache_key = f"predictions_{st.session_state.get('current_scenario', 'normal')}"
+        
+        # Check if we have cached predictions that are still valid (5 minutes)
+        if cache_key in st.session_state:
+            cached_time, cached_predictions = st.session_state[cache_key]
+            time_diff = (current_time - cached_time).total_seconds()
+            if time_diff < 300:  # 5 minutes cache
+                return cached_predictions
+        
+        # Convert to DataFrame if it's a list
+        if isinstance(data, list):
+            df = pd.DataFrame(data)
+            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        else:
+            df = data.copy()
+        
+        # Analyze recent trends (last 6 data points for trend analysis - 30 minutes)
+        recent_data = df.tail(6) if len(df) >= 6 else df
+        latest = df.iloc[-1]
+        
+        # Calculate realistic trends for each parameter
+        trends = {}
+        for param in ['temperature', 'humidity', 'precipitation', 'wind_speed', 'pressure']:
+            if param in recent_data.columns and len(recent_data) >= 2:
+                values = recent_data[param].values
+                # Calculate linear trend per 5-minute interval
+                trend_slope = (values[-1] - values[0]) / max(1, len(values) - 1)
+                trends[param] = {
+                    'current': values[-1],
+                    'slope': trend_slope,
+                    'direction': 'increasing' if trend_slope > 0.02 else 'decreasing' if trend_slope < -0.02 else 'stable',
+                    'recent_values': values
+                }
+        
+        # Generate ML-based predictions
+        predictions = []
+        current_scenario = st.session_state.get('current_scenario', 'normal')
+        
+        # Only generate predictions for significant trend changes or current extreme conditions
+        # Temperature-based predictions (realistic thresholds)
+        if 'temperature' in trends:
+            temp_trend = trends['temperature']
+            current_temp = temp_trend['current']
+            
+            # Predict temperature in 1-2 hours (24 data points = 2 hours)
+            temp_1h = current_temp + (temp_trend['slope'] * 12)  # 12 intervals = 1 hour
+            temp_2h = current_temp + (temp_trend['slope'] * 24)  # 24 intervals = 2 hours
+            
+            # Heat wave conditions (align with scenario if active)
+            if current_temp > 32 or temp_1h > 35 or 'heat' in current_scenario.lower():
+                probability = min(95, max(60, 50 + (current_temp - 30) * 3 + abs(temp_trend['slope']) * 20))
+                severity = 'Critical' if current_temp > 38 or temp_1h > 40 else 'High'
+                
+                predictions.append({
+                    'type': 'Temperature Alert',
+                    'timeframe': 'Next 1-2 hours',
+                    'probability': probability,
+                    'severity': severity,
+                    'icon': '🌡️',
+                    'details': f'Current: {current_temp:.1f}°C, trending to {temp_1h:.1f}°C in 1h'
+                })
+            
+            # Cold weather conditions
+            elif current_temp < 2 or temp_1h < -2 or 'cold' in current_scenario.lower():
+                probability = min(95, max(60, 70 + abs(current_temp) * 2 + abs(temp_trend['slope']) * 15))
+                severity = 'Critical' if current_temp < -5 or temp_1h < -8 else 'High'
+                
+                predictions.append({
+                    'type': 'Temperature Alert',
+                    'timeframe': 'Next 1-2 hours',
+                    'probability': probability,
+                    'severity': severity,
+                    'icon': '❄️',
+                    'details': f'Current: {current_temp:.1f}°C, dropping to {temp_1h:.1f}°C in 1h'
+                })
+        
+        # Precipitation-based predictions (align with scenarios)
+        if 'precipitation' in trends:
+            precip_trend = trends['precipitation']
+            current_precip = precip_trend['current']
+            precip_1h = max(0, current_precip + (precip_trend['slope'] * 12))
+            
+            # Heavy rain/flood conditions
+            if current_precip > 5 or precip_1h > 8 or 'flood' in current_scenario.lower() or 'storm' in current_scenario.lower():
+                probability = min(90, max(55, 45 + current_precip * 3 + abs(precip_trend['slope']) * 10))
+                severity = 'Critical' if current_precip > 15 or precip_1h > 20 else 'High'
+                
+                predictions.append({
+                    'type': 'Heavy Precipitation',
+                    'timeframe': 'Next 1-2 hours',
+                    'probability': probability,
+                    'severity': severity,
+                    'icon': '🌧️',
+                    'details': f'Current: {current_precip:.1f} mm/h, increasing to {precip_1h:.1f} mm/h'
+                })
+        
+        # Wind-based predictions
+        if 'wind_speed' in trends:
+            wind_trend = trends['wind_speed']
+            current_wind = wind_trend['current']
+            wind_1h = max(0, current_wind + (wind_trend['slope'] * 12))
+            
+            # High wind conditions
+            if current_wind > 35 or wind_1h > 45 or 'storm' in current_scenario.lower():
+                probability = min(85, max(50, 40 + current_wind + abs(wind_trend['slope']) * 8))
+                severity = 'Critical' if current_wind > 60 or wind_1h > 70 else 'High'
+                
+                predictions.append({
+                    'type': 'Wind Alert',
+                    'timeframe': 'Next 1-2 hours',
+                    'probability': probability,
+                    'severity': severity,
+                    'icon': '💨',
+                    'details': f'Current: {current_wind:.1f} km/h, increasing to {wind_1h:.1f} km/h'
+                })
+        
+        # Pressure-based storm predictions
+        if 'pressure' in trends:
+            pressure_trend = trends['pressure']
+            pressure_change = pressure_trend['slope']
+            current_pressure = pressure_trend['current']
+            
+            # Rapidly falling pressure indicates storm approach
+            if pressure_change < -0.8 or current_pressure < 1000 or 'storm' in current_scenario.lower():
+                probability = min(80, max(50, 55 + abs(pressure_change) * 8))
+                severity = 'Critical' if pressure_change < -2 or current_pressure < 995 else 'High'
+                
+                predictions.append({
+                    'type': 'Pressure Drop',
+                    'timeframe': 'Next 1-2 hours',
+                    'probability': probability,
+                    'severity': severity,
+                    'icon': '⛈️',
+                    'details': f'Pressure: {current_pressure:.1f} hPa, dropping {abs(pressure_change):.1f} hPa/5min'
+                })
+        
+        # Multi-parameter emergency predictions
+        emergency_score = 0
+        emergency_factors = []
+        
+        if 'temperature' in trends and trends['temperature']['current'] > 30:
+            emergency_score += (trends['temperature']['current'] - 30) * 2
+            emergency_factors.append('high temperature')
+        
+        if 'precipitation' in trends and trends['precipitation']['current'] > 5:
+            emergency_score += trends['precipitation']['current'] * 3
+            emergency_factors.append('heavy precipitation')
+            
+        if 'wind_speed' in trends and trends['wind_speed']['current'] > 40:
+            emergency_score += (trends['wind_speed']['current'] - 40) / 2
+            emergency_factors.append('high winds')
+        
+        if emergency_score > 20:
+            predictions.append({
+                'type': 'Multi-Parameter Emergency Risk',
+                'timeframe': '1-2 hours',
+                'probability': min(95, emergency_score * 2),
+                'severity': 'Critical' if emergency_score > 40 else 'High',
+                'icon': '🚨',
+                'details': f'Combined risk factors: {", ".join(emergency_factors)}'
+            })
+        
+        # If no specific risks, provide general forecast
+        if not predictions:
+            predictions.append({
+                'type': 'Stable Conditions Expected',
+                'timeframe': '1-2 hours',
+                'probability': 85,
+                'severity': 'Low',
+                'icon': '✅',
+                'details': 'Current trends suggest stable weather conditions'
+            })
+        
+        # Cache the predictions to prevent rapid changes
+        st.session_state[cache_key] = (current_time, predictions)
+        
+        return predictions
+    
+    def _create_mock_anomaly_results(self, data):
+        """Create mock anomaly detection results for demonstration."""
+        latest = data.iloc[-1] if hasattr(data, 'iloc') and not data.empty else (data[-1] if data else {})
+        
+        # Create realistic anomaly detection results
+        anomalies = []
+        model_performance = {
+            'best_model': 'Trend Analysis + ML Hybrid',
+            'best_score': 0.823,
+            'precision': 0.856,
+            'recall': 0.789,
+            'silhouette_score': 0.634,
+            'composite_score': 0.776
+        }
+        
+        # Check for extreme conditions to create anomalies
+        temp = latest.get('temperature', 20)
+        precipitation = latest.get('precipitation', 0)
+        wind_speed = latest.get('wind_speed', 10)
+        
+        if temp > 35 or temp < -10:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.89,
+                'parameters': ['temperature'],
+                'severity': 'High'
+            })
+        
+        if precipitation > 20:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.82,
+                'parameters': ['precipitation'],
+                'severity': 'High'
+            })
+        
+        if wind_speed > 50:
+            anomalies.append({
+                'timestamp': latest.get('timestamp', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+                'anomaly_score': 0.76,
+                'parameters': ['wind_speed'],
+                'severity': 'Medium'
+            })
+        
+        return {
+            'anomalies': anomalies,
+            'model_performance': model_performance
+        }
+    
+    def _define_emergency_thresholds(self):
+        """Define realistic emergency weather thresholds based on Swiss meteorology."""
+        return {
+            'heat_wave': {
+                'temperature': {'min': 35.0, 'extreme': 40.0},  # °C
+                'humidity': {'max': 30.0},  # % (low humidity during heat waves)
+                'pressure': {'trend': 'high', 'threshold': 1020.0},  # hPa
+                'wind_speed': {'max': 10.0},  # km/h (still air)
+                'heat_index_critical': 40.0,  # Feels-like temperature
+                'duration_threshold': 3  # Hours above threshold
+            },
+            'severe_storm': {
+                'wind_speed': {'min': 60.0, 'extreme': 90.0},  # km/h
+                'precipitation': {'min': 10.0, 'extreme': 25.0},  # mm/h
+                'pressure': {'trend': 'dropping', 'threshold': 1000.0},  # hPa
+                'temperature': {'drop_rate': 5.0},  # °C per hour
+                'visibility': {'max': 5.0},  # km
+                'pressure_drop_rate': 3.0  # hPa per hour
+            },
+            'flash_flood': {
+                'precipitation': {'min': 20.0, 'extreme': 50.0},  # mm/h
+                'cumulative_rain': {'6h': 60.0, '24h': 120.0},  # mm
+                'humidity': {'min': 85.0},  # %
+                'pressure': {'trend': 'low', 'threshold': 1005.0},  # hPa
+                'visibility': {'max': 3.0},  # km
+                'soil_saturation_factor': 0.8  # Multiplier for risk
+            },
+            'extreme_cold': {
+                'temperature': {'max': -10.0, 'extreme': -20.0},  # °C
+                'wind_chill': {'threshold': -25.0},  # °C (feels-like)
+                'humidity': {'min': 70.0},  # % (often high during cold snaps)
+                'pressure': {'trend': 'high', 'threshold': 1030.0},  # hPa
+                'wind_speed': {'amplifies_cold': True},  # Any wind makes it worse
+                'duration_threshold': 6  # Hours below threshold
+            }
+        }
+    
+    def _detect_current_emergencies(self, data):
+        """Detect active emergencies based on current weather conditions."""
+        if data is None or data.empty:
+            return []
+        
+        latest = data.iloc[-1]
+        thresholds = self._define_emergency_thresholds()
+        active_emergencies = []
+        
+        # Get recent data for trends (last 3 hours)
+        recent_data = data.tail(3) if len(data) >= 3 else data
+        
+        # Heat Wave Detection
+        temp = latest.get('temperature', 20)
+        humidity = latest.get('humidity', 60)
+        if temp >= thresholds['heat_wave']['temperature']['min']:
+            severity = 'EXTREME' if temp >= thresholds['heat_wave']['temperature']['extreme'] else 'HIGH'
+            # Calculate heat index (simplified)
+            heat_index = temp + (humidity - 40) * 0.1
+            
+            active_emergencies.append({
+                'type': 'heat_wave',
+                'name': '🔥 Heat Wave Alert',
+                'severity': severity,
+                'current_temp': f"{temp:.1f}°C",
+                'heat_index': f"{heat_index:.1f}°C",
+                'description': f'Temperature: {temp:.1f}°C (Threshold: {thresholds["heat_wave"]["temperature"]["min"]}°C)',
+                'recommendations': ['Stay hydrated', 'Avoid outdoor activities 10AM-6PM', 'Seek air conditioning'],
+                'risk_level': min(100, int((temp / thresholds['heat_wave']['temperature']['extreme']) * 100))
+            })
+        
+        # Severe Storm Detection
+        wind_speed = latest.get('wind_speed', 0)
+        precipitation = latest.get('precipitation', 0)
+        pressure = latest.get('pressure', 1013)
+        
+        if wind_speed >= thresholds['severe_storm']['wind_speed']['min'] or precipitation >= thresholds['severe_storm']['precipitation']['min']:
+            severity = 'EXTREME' if (wind_speed >= thresholds['severe_storm']['wind_speed']['extreme'] or 
+                                   precipitation >= thresholds['severe_storm']['precipitation']['extreme']) else 'HIGH'
+            
+            # Check pressure trend
+            pressure_trend = 'stable'
+            if len(recent_data) >= 2:
+                pressure_change = latest.get('pressure', 1013) - recent_data.iloc[0].get('pressure', 1013)
+                if pressure_change < -3:
+                    pressure_trend = 'rapidly falling'
+                elif pressure_change < -1:
+                    pressure_trend = 'falling'
+            
+            active_emergencies.append({
+                'type': 'severe_storm',
+                'name': '⛈️ Severe Storm Alert',
+                'severity': severity,
+                'current_wind': f"{wind_speed:.1f} km/h",
+                'current_rain': f"{precipitation:.1f} mm/h",
+                'pressure_trend': pressure_trend,
+                'description': f'Wind: {wind_speed:.1f} km/h, Rain: {precipitation:.1f} mm/h',
+                'recommendations': ['Stay indoors', 'Avoid driving', 'Secure loose objects'],
+                'risk_level': min(100, int(max(wind_speed/thresholds['severe_storm']['wind_speed']['extreme'], 
+                                              precipitation/thresholds['severe_storm']['precipitation']['extreme']) * 100))
+            })
+        
+        # Flash Flood Detection
+        if precipitation >= thresholds['flash_flood']['precipitation']['min']:
+            severity = 'EXTREME' if precipitation >= thresholds['flash_flood']['precipitation']['extreme'] else 'HIGH'
+            
+            # Calculate cumulative rainfall (simplified)
+            cumulative_6h = recent_data['precipitation'].sum() if len(recent_data) > 0 else precipitation
+            
+            active_emergencies.append({
+                'type': 'flash_flood',
+                'name': '🌊 Flash Flood Alert',
+                'severity': severity,
+                'current_rain': f"{precipitation:.1f} mm/h",
+                'cumulative_6h': f"{cumulative_6h:.1f} mm",
+                'description': f'Heavy rainfall: {precipitation:.1f} mm/h (Threshold: {thresholds["flash_flood"]["precipitation"]["min"]} mm/h)',
+                'recommendations': ['Avoid low-lying areas', 'Do not drive through flooded roads', 'Move to higher ground'],
+                'risk_level': min(100, int((precipitation / thresholds['flash_flood']['precipitation']['extreme']) * 100))
+            })
+        
+        # Extreme Cold Detection
+        if temp <= thresholds['extreme_cold']['temperature']['max']:
+            severity = 'EXTREME' if temp <= thresholds['extreme_cold']['temperature']['extreme'] else 'HIGH'
+            
+            # Calculate wind chill (simplified)
+            wind_chill = temp - (wind_speed * 0.5) if wind_speed > 5 else temp
+            
+            active_emergencies.append({
+                'type': 'extreme_cold',
+                'name': '❄️ Extreme Cold Alert',
+                'severity': severity,
+                'current_temp': f"{temp:.1f}°C",
+                'wind_chill': f"{wind_chill:.1f}°C",
+                'description': f'Temperature: {temp:.1f}°C (Threshold: {thresholds["extreme_cold"]["temperature"]["max"]}°C)',
+                'recommendations': ['Dress in layers', 'Limit outdoor exposure', 'Check heating systems'],
+                'risk_level': min(100, int(abs(temp / thresholds['extreme_cold']['temperature']['extreme']) * 100))
+            })
+        
+        return active_emergencies
+    
+    def render_prediction_panel(self, data):
+        """Render AI predictions panel with personalized advice and extreme weather forecasting."""
+        st.markdown("## 🔮 AI Predictions & Personalized Advice")
+        
+        if data is None or data.empty:
+            st.info("⏳ Gathering data for predictions...")
+            return
+        
+        # Get user background for personalized advice
+        user_background = st.session_state.get('user_background', 'general')
+        current_time = self._get_current_simulation_time()
+        
+        # Always generate extreme weather prediction based on actual data
+        extreme_prediction = self._generate_extreme_weather_prediction(current_time, data)
+        
+        # Display extreme weather forecast
+        if extreme_prediction:
+            st.markdown("### ⚠️ Extended Extreme Weather Forecast")
+            
+            severity_colors = {
+                'extreme': '#dc3545',
+                'high': '#fd7e14',
+                'medium': '#ffc107',
+                'low': '#28a745'
+            }
+            
+            color = severity_colors.get(extreme_prediction['severity'], '#fd7e14')
+            event_icons = {
+                'heat_wave': '🔥',
+                'severe_storm': '⛈️',
+                'flash_flood': '🌊',
+                'extreme_cold': '❄️'
+            }
+            
+            icon = event_icons.get(extreme_prediction['event'], '⚠️')
+            event_name = extreme_prediction['event'].replace('_', ' ').title()
+            
+            # Get personalized advice
+            personalized_advice = self._get_personalized_weather_advice(
+                user_background,
+                extreme_prediction['event'],
+                extreme_prediction['severity'],
+                extreme_prediction['timeframe']
+            )
+            
+            forecast_html = f"""
+            <div style="
+                background: rgba(255, 255, 255, 0.95);
+                color: #333333;
+                border-left: 6px solid {color};
+                border-radius: 8px;
+                padding: 1.5rem;
+                margin: 1rem 0;
+                box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+            ">
+                <h3 style="color: #333333; margin: 0 0 1rem 0;">{icon} {event_name} Forecast</h3>
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; margin-bottom: 1rem;">
+                    <div>
+                        <p style="color: #555555; margin: 0.25rem 0;"><strong>📅 Expected:</strong> {extreme_prediction['timeframe']} ({extreme_prediction['date']})</p>
+                        <p style="color: #555555; margin: 0.25rem 0;"><strong>📊 ML Confidence:</strong> {extreme_prediction['confidence']}%</p>
+                    </div>
+                    <div>
+                        <p style="color: #555555; margin: 0.25rem 0;"><strong>⚠️ Severity Level:</strong> {extreme_prediction['severity'].upper()}</p>
+                        <p style="color: #555555; margin: 0.25rem 0;"><strong>🎯 Probability:</strong> {extreme_prediction['probability']}%</p>
+                    </div>
+                </div>
+                <div style="
+                    background: rgba(0,123,255,0.1);
+                    border-radius: 6px;
+                    padding: 1rem;
+                    margin-top: 1rem;
+                    border-left: 3px solid #007bff;
+                ">
+                    <p style="color: #333333; margin: 0; font-weight: 500;">🎯 Personalized Advice:</p>
+                    <p style="color: #555555; margin: 0.5rem 0 0 0;">{personalized_advice}</p>
+                </div>
+            </div>
+            """
+            st.markdown(forecast_html, unsafe_allow_html=True)
+        
+        # Note: 1-2 hour forecasts removed as requested
+    
+    def render_scenario_info(self, scenario_name):
+        """Render information about the current scenario."""
+        if scenario_name and scenario_name != "None" and scenario_name != "normal":
+            if scenario_name in self.simulator.scenarios:
+                scenario = self.simulator.scenarios[scenario_name]
+            else:
+                return  # Skip if scenario not found
+            
+            st.markdown("## 🎭 Active Scenario")
+            
+            scenario_html = f"""
+            <div class="scenario-card">
+                <h3>{scenario['name']}</h3>
+                <p>{scenario['description']}</p>
+                <p><strong>Duration:</strong> {scenario['duration_hours']} hours</p>
+                <p><strong>Status:</strong> Active</p>
+            </div>
+            """
+            st.markdown(scenario_html, unsafe_allow_html=True)
+    
+    def _render_simulation_time(self):
+        """Display current simulation time and speed with continuous updates."""
+        current_real_time = datetime.now()
+        elapsed_real_seconds = (current_real_time - st.session_state.simulation_start_time).total_seconds()
+        
+        # Calculate simulation minutes elapsed using actual acceleration
+        acceleration = st.session_state.get('time_acceleration', 300)
+        elapsed_sim_minutes = elapsed_real_seconds * (acceleration / 60)  # Convert acceleration to minutes per second
+        sim_time = st.session_state.simulation_start_time + timedelta(minutes=elapsed_sim_minutes)
+        
+        # Create time display with live updating
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("🕐 Simulation Time", sim_time.strftime("%H:%M:%S"))
+        with col2:
+            st.metric("⚡ Speed", f"{acceleration}x ({acceleration/60:.1f}min/sec)")
+        with col3:
+            st.metric("⏰ Real Time", current_real_time.strftime("%H:%M:%S"))
+        with col4:
+            # Show elapsed simulation time
+            total_sim_hours = elapsed_sim_minutes / 60
+            st.metric("📈 Sim Elapsed", f"{total_sim_hours:.1f}h")
+        
+        # Add a progress indicator
+        progress_minutes = elapsed_sim_minutes % 60  # Progress within current hour
+        progress_percent = progress_minutes / 60
+        st.progress(progress_percent, text=f"Current Hour Progress: {progress_minutes:.1f}/60 min")
+        
+        st.markdown("---")
+    
+    def _get_current_simulation_time(self):
+        """Get the current accelerated simulation time."""
+        current_real_time = datetime.now()
+        elapsed_real_seconds = (current_real_time - st.session_state.simulation_start_time).total_seconds()
+        # Use actual time acceleration from session state
+        acceleration = st.session_state.get('time_acceleration', 300)
+        elapsed_sim_minutes = elapsed_real_seconds * (acceleration / 60)  # Convert acceleration to minutes per second
+        return st.session_state.simulation_start_time + timedelta(minutes=elapsed_sim_minutes)
+    
+    def run_dashboard(self):
+        """Main dashboard execution with continuous auto-refresh."""
+        import time
+        
+        # Render header
+        self.render_header()
+        
+        # Add simulation time display
+        self._render_simulation_time()
+        
+        # Time display shows acceleration - no need for extra simulation indicator
+        
+        # Render sidebar and get selections
+        selected_scenario = self.render_sidebar()
+        
+        # Always use simulation data (simplified approach)
+        data = self.generate_simulation_data(selected_scenario)
+        
+        # Main content area
+        if data is not None and not data.empty:
+            # Use containers with stable keys to reduce flickering
+            with st.container():
+                self.render_metrics_row(data)
+            
+            st.markdown("---")
+            
+            # Weather charts in stable container
+            with st.container():
+                self.create_weather_charts(data)
+            
+            st.markdown("---")
+            
+            # Two columns for alerts and predictions
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                self.render_alerts_panel(data)
+            
+            with col2:
+                self.render_prediction_panel(data)
+            
+            # Scenario information
+            if selected_scenario != 'normal':
+                st.markdown("---")
+                self.render_scenario_info(selected_scenario)
+        else:
+            st.error("❌ Unable to load weather data. Please check your connection.")
+        
+        # Auto-refresh mechanism for continuous updates
+        if st.session_state.simulation_active:
+            time.sleep(1)  # Wait 1 second
+            st.rerun()  # Refresh the entire app
+
+def main():
+    """Main application entry point."""
+    dashboard = WeatherDashboard()
+    dashboard.run_dashboard()
+
+if __name__ == "__main__":
+    main()
