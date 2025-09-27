@@ -78,13 +78,8 @@ echo.
 REM Always prefer module invocation to ensure consistent environment
 set PORT=8501
 
-REM Try to let Streamlit pick a free port if 8501 is in use
-for /f "usebackq delims=" %%p in (`"%VENV_PY%" -c "import socket; p=8501; s=socket.socket(); s.settimeout(0.2); used = s.connect_ex(('127.0.0.1',p))==0; s.close(); print(0 if used else p)"`) do set PORT=%%p
-
 echo.
-echo Launching Streamlit (URL will be shown below)...
-REM Let Streamlit pick a free port automatically
-set PORT=0
+echo Launching Streamlit on port %PORT% ...
 "%VENV_PY%" -m streamlit run weather_app.py --server.headless false --server.port %PORT% --server.address localhost
 set "EXITCODE=%errorlevel%"
 
