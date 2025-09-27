@@ -1,7 +1,8 @@
 ## Also accessible publicly here: https://bias-and-variance.streamlit.app/
 
 ## Installation
-*Important: Make sure to have Python installed before running!* 
+**Important: Make sure to have Python installed before running!**
+
 - Simply run the start_app.bat file in the lauzhack folder. The program will install all necessary libraries then start a localhost server. (localhost:8501 as default)
 - Manual (PowerShell)
 ```powershell
@@ -21,6 +22,7 @@ python -m streamlit run weather_app.py
 - AI-powered weather anomaly detection for extreme weather forecast with 7-days.
 
 ## Important Remarks
+**For the best experience viewing graphs, use dark mode (three dots at right-upper corner > settings)**
 - The model trains itself on recent prediction accuracy. For better results, please give the app some time to catch up.
 - The ML score is naturally lower for extreme weather scenarios, as they are rare and unpredictable. 
 - For demonstration purposes, changes in weather conditions are exaggerated.

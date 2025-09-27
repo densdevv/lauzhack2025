@@ -266,7 +266,7 @@ class WeatherDashboard:
         
         # Toggle simulation button (Start/Stop)
         if st.session_state.get('simulation_active', False):
-            if st.sidebar.button("⏹️ Stop Simulation", type="secondary", use_container_width=True):
+            if st.sidebar.button("⏹️ Reset Simulation", type="secondary", use_container_width=True):
                 self.stop_simulation()
         else:
             if st.sidebar.button("▶️ Start Simulation", type="primary", use_container_width=True):
