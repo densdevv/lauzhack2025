@@ -1,16 +1,4 @@
 #!/usr/bin/env python3
-"""
-Swiss Weather Emergency Simulator
-=================================
-
-Dynamic emergency scenario simulator for the Swiss Weather Intelligence System.
-Creates realistic emergency weather conditions with real-time alerts and responses.
-
-Perfect for hackathon presentations and system demonstrations.
-
-Author: EPFL Hackathon Team
-Date: September 2025
-"""
 
 import pandas as pd
 import numpy as np

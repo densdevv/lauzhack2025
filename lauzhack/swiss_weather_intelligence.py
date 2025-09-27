@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Complete Swiss Weather Intelligence System - EPFL Hackathon Demo
-================================================================
-
-Comprehensive demonstration of anomaly detection and extreme weather prediction
-for building resilience against climate risks in Switzerland.
-
-This system combines:
-1. Real-time weather data access from Swiss meteorological network
-2. Advanced anomaly detection using machine learning
-3. Predictive early warning system
-4. Interactive dashboards and reports
-5. Actionable recommendations for risk mitigation
-
-Author: EPFL Hackathon Team
-Date: September 26, 2025
-"""
 
 import pandas as pd
 import numpy as np

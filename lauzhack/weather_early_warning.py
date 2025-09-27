@@ -1,22 +1,4 @@
 #!/usr/bin/env python3
-"""
-Swiss Weather Early Warning System
-==================================
-
-Predictive early warning system for extreme weather events in Switzerland.
-Uses time series forecasting and trend analysis to predict anomalies 
-before they become critical.
-
-Features:
-- Short-term weather forecasting (6-24 hours ahead)
-- Trend-based anomaly prediction
-- Risk scoring for different weather hazards
-- Real-time alert generation
-- Integration with Swiss weather monitoring network
-
-Author: EPFL Hackathon Team
-Date: September 2025
-"""
 
 import pandas as pd
 import numpy as np

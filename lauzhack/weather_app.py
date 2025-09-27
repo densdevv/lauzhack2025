@@ -434,12 +434,66 @@ class WeatherDashboard:
         # Check if we have stored predictions to compare against
         if not hasattr(st.session_state, 'stored_predictions'):
             st.session_state.stored_predictions = {}
-        
-        scenario_key = f"{scenario_name}_{current_sim_time.strftime('%Y%m%d_%H')}"
-        
-        # Store current predictions if not already stored
-        if scenario_key not in st.session_state.stored_predictions:
-            st.session_state.stored_predictions[scenario_key] = prediction_data.copy()
+
+        # Use 5-minute granularity for forecast runs and store generation time
+        bucket_minute = (current_sim_time.minute // 5) * 5
+        bucket_time = current_sim_time.replace(minute=bucket_minute, second=0, microsecond=0)
+        scenario_key = f"{scenario_name}_{bucket_time.strftime('%Y%m%d_%H%M')}"
+
+        # Store current predictions for this 5-minute run
+        st.session_state.stored_predictions[scenario_key] = {
+            'generated_at': bucket_time,
+            'predictions': prediction_data.copy(),
+        }
+
+        # Prune very old stored predictions PER SCENARIO using generation time (keep last ~4 hours = 48 buckets)
+        try:
+            scenario_prefix = f"{scenario_name}_"
+            # Collect (key, generated_at) for current scenario only
+            scenario_entries = []
+            for k, v in st.session_state.stored_predictions.items():
+                if not k.startswith(scenario_prefix):
+                    continue
+                gen_at = None
+                if isinstance(v, dict) and 'generated_at' in v and v['generated_at'] is not None:
+                    gen_at = pd.to_datetime(v['generated_at'])
+                else:
+                    # Fallback: parse from key suffix YYYYmmdd_HHMM if present
+                    try:
+                        suffix = k.split('_', 1)[1]  # e.g. 20250927_1505
+                        gen_at = pd.to_datetime(suffix, format='%Y%m%d_%H%M', errors='coerce')
+                    except Exception:
+                        gen_at = None
+                scenario_entries.append((k, gen_at))
+
+            # Sort by generated_at, treating None as very old
+            scenario_entries.sort(key=lambda x: (pd.Timestamp.min if x[1] is None else x[1]))
+
+            # If more than 48 entries for this scenario, drop the oldest beyond the last 48
+            if len(scenario_entries) > 48:
+                to_remove = [k for (k, _) in scenario_entries[:-48]]
+                for k in to_remove:
+                    st.session_state.stored_predictions.pop(k, None)
+
+            # Optional: global safety cap to avoid unbounded growth across all scenarios
+            all_entries = list(st.session_state.stored_predictions.items())
+            if len(all_entries) > 400:
+                # Drop the oldest globally based on generated_at
+                def _get_gen_at(item):
+                    v = item[1]
+                    if isinstance(v, dict) and v.get('generated_at') is not None:
+                        return pd.to_datetime(v['generated_at'])
+                    try:
+                        suffix = item[0].split('_', 1)[1]
+                        return pd.to_datetime(suffix, format='%Y%m%d_%H%M', errors='coerce')
+                    except Exception:
+                        return pd.NaT
+
+                all_entries.sort(key=lambda item: (_get_gen_at(item) if pd.notna(_get_gen_at(item)) else pd.Timestamp.min))
+                for k, _ in all_entries[:-400]:
+                    st.session_state.stored_predictions.pop(k, None)
+        except Exception:
+            pass
         
         # Check if any old predictions should now be compared with actual data
         # Only show past predictions for time intervals where actual data was recorded/generated
@@ -455,19 +509,34 @@ class WeatherDashboard:
                 if latest_actual_time is None or timestamp > latest_actual_time:
                     latest_actual_time = timestamp
             
-            for key, stored_preds in st.session_state.stored_predictions.items():
-                if key.startswith(scenario_name):
-                    for pred in stored_preds:
-                        pred_time = pd.to_datetime(pred['timestamp'])
-                        pred_time_floored = pred_time.floor('5min')
-                        
-                        # Only include old predictions if:
-                        # 1. Prediction time is before or at the latest actual data time (not future predictions)
-                        # 2. We actually have recorded/generated actual data for this specific timestamp
-                        if latest_actual_time and pred_time <= latest_actual_time and pred_time_floored in actual_timestamps:
-                            pred_copy = pred.copy()
-                            pred_copy['data_type'] = 'old_prediction'
-                            old_predictions.append(pred_copy)
+            for key, stored_item in st.session_state.stored_predictions.items():
+                if not key.startswith(scenario_name):
+                    continue
+
+                # Support both legacy list and new dict format
+                if isinstance(stored_item, dict) and 'predictions' in stored_item:
+                    preds_iter = stored_item['predictions']
+                    generated_at = pd.to_datetime(stored_item.get('generated_at')) if stored_item.get('generated_at') else None
+                else:
+                    preds_iter = stored_item
+                    generated_at = None
+
+                for pred in preds_iter:
+                    pred_time = pd.to_datetime(pred['timestamp'])
+                    pred_time_floored = pred_time.floor('5min')
+
+                    # Only include old predictions if:
+                    # 1) The forecasted timestamp is now in the past (<= latest actual)
+                    # 2) We had actual data at that timestamp (to compare)
+                    # 3) The forecast was generated BEFORE the predicted time (no hindsight)
+                    cond_past = latest_actual_time is not None and pred_time <= latest_actual_time
+                    cond_has_actual = pred_time_floored in actual_timestamps
+                    cond_generated_before = True if generated_at is None else (generated_at <= pred_time)
+
+                    if cond_past and cond_has_actual and cond_generated_before:
+                        pred_copy = pred.copy()
+                        pred_copy['data_type'] = 'old_prediction'
+                        old_predictions.append(pred_copy)
         
         # Combine actual, prediction, and old prediction data with metadata
         df_actual = pd.DataFrame(actual_data)
@@ -970,39 +1039,42 @@ class WeatherDashboard:
         # Prepare features for ML prediction
         features = ['temperature', 'humidity', 'precipitation', 'wind_speed', 'pressure']
         
-        # Advanced trend analysis using multiple window sizes
+        # Enhanced trend analysis that responds to actual data patterns
         trends = {}
         for param in features:
             values = historical_df[param].values
             
-            # Multi-scale trend analysis
-            short_term_trend = self._calculate_trend(values[-6:]) if len(values) >= 6 else 0  # 30 min
-            medium_term_trend = self._calculate_trend(values[-12:]) if len(values) >= 12 else 0  # 60 min
-            long_term_trend = self._calculate_trend(values[-24:]) if len(values) >= 24 else 0  # 120 min
+            # Multi-scale trend analysis with emphasis on recent data
+            short_term_trend = self._calculate_trend(values[-3:]) if len(values) >= 3 else 0  # Last 15 min
+            medium_term_trend = self._calculate_trend(values[-6:]) if len(values) >= 6 else 0  # Last 30 min  
+            long_term_trend = self._calculate_trend(values[-12:]) if len(values) >= 12 else 0  # Last 60 min
             
-            # Volatility measurement for uncertainty quantification
-            volatility = np.std(np.diff(values[-12:])) if len(values) >= 13 else 0.1
-            
-            # Seasonal/cyclical patterns (simple daily cycle detection)
-            if len(values) >= 12:  # At least 1 hour of data
-                cycle_strength = self._detect_cyclical_pattern(values[-24:]) if len(values) >= 24 else 0
+            # Calculate recent change rate for responsiveness
+            if len(values) >= 2:
+                recent_change = (values[-1] - values[-2])  # Change in last 5 minutes
             else:
-                cycle_strength = 0
+                recent_change = 0
+            
+            # Volatility measurement for realistic uncertainty
+            volatility = np.std(np.diff(values[-6:])) if len(values) >= 7 else 0.1
             
             trends[param] = {
                 'current': values[-1],
                 'short_trend': short_term_trend,
                 'medium_trend': medium_term_trend,
                 'long_trend': long_term_trend,
-                'volatility': volatility,
-                'cycle_strength': cycle_strength
+                'recent_change': recent_change,
+                'volatility': volatility
             }
         
         # ML-based state evolution - ensure exact starting values for continuity
         pred_state = {param: float(historical_df[param].iloc[-1]) for param in features}
         
+        # Store the starting values to ensure smooth continuity
+        start_values = pred_state.copy()
+        
         # Generate 24 prediction points (2 hours into the future)
-        # Start from i=1 to maintain separation from actual data timestamp
+        # Start from i=1 to maintain separation from actual data timestamp  
         for i in range(1, 25):
             future_time = current_time + timedelta(minutes=i * 5)
             
@@ -1010,33 +1082,59 @@ class WeatherDashboard:
             for param in features:
                 trend_info = trends[param]
                 
-                # Weighted trend combination (emphasize recent trends more)
+                # Enhanced trend combination that emphasizes recent changes
                 combined_trend = (
-                    0.5 * trend_info['short_trend'] +
+                    0.6 * trend_info['short_trend'] +     # Emphasize recent trends more
                     0.3 * trend_info['medium_trend'] +
-                    0.2 * trend_info['long_trend']
+                    0.1 * trend_info['long_trend'] +      # Fixed key name
+                    0.4 * trend_info['recent_change']      # Add immediate change influence
                 )
                 
-                # Time decay for trend reliability
-                time_decay = np.exp(-i * 0.05)  # Exponential decay
+                # Use real-time trend analysis without artificial patterns
+                # Make predictions responsive to actual data by reducing time decay
+                time_decay = max(0.7, np.exp(-i * 0.02))  # Slower decay to maintain trend influence
                 effective_trend = combined_trend * time_decay
                 
-                # Reduced uncertainty for more stable predictions
-                uncertainty = trend_info['volatility'] * np.sqrt(i * 0.05)  # Reduced from 0.1 to 0.05
+                # Add scenario-based modifications to make predictions scenario-aware
+                current_scenario = st.session_state.get('current_scenario', 'normal')
+                scenario_influence = 0
                 
-                # Add cyclical component if detected
-                cyclical_component = 0
-                if trend_info['cycle_strength'] > 0.1:
-                    # Simple sinusoidal cycle approximation
-                    cycle_phase = (i * 5) / 60.0 * 2 * np.pi  # Phase based on time
-                    cyclical_component = trend_info['cycle_strength'] * np.sin(cycle_phase)
+                if current_scenario != 'normal':
+                    # Apply scenario-specific trends that evolve over time
+                    intensity = min(1.0, i / 12.0)  # Build intensity over time
+                    
+                    if 'heat' in current_scenario.lower() and param == 'temperature':
+                        scenario_influence = 0.15 * intensity  # Progressive temperature rise
+                    elif 'storm' in current_scenario.lower():
+                        if param == 'wind_speed':
+                            scenario_influence = 0.3 * intensity
+                        elif param == 'precipitation':
+                            # More controlled precipitation increase - capped to prevent infinite accumulation
+                            if pred_state[param] < 8:  # Only increase if below moderate rain
+                                scenario_influence = 0.1 * intensity * (8 - pred_state[param]) / 8
+                            else:
+                                scenario_influence = -0.05  # Slight decrease if already high
+                        elif param == 'pressure':
+                            scenario_influence = -0.1 * intensity  # Dropping pressure
+                    elif 'flood' in current_scenario.lower() and param == 'precipitation':
+                        # More controlled flood precipitation - prevent runaway accumulation
+                        if pred_state[param] < 12:  # Only increase if below heavy rain
+                            scenario_influence = 0.15 * intensity * (12 - pred_state[param]) / 12
+                        else:
+                            scenario_influence = -0.02  # Slight decrease if already very high
                 
-                # Use seed for consistent randomness based on parameter and time step
-                np.random.seed(hash(param + str(i)) % 2**32)
-                random_component = np.random.normal(0, uncertainty * 0.3)  # Reduced random influence
+                # Minimal random component for smoothness only
+                uncertainty = trend_info['volatility'] * 0.1  # Reduced uncertainty
+                random_component = np.random.normal(0, uncertainty)
                 
-                # Combine all components with reduced randomness
-                change = effective_trend + cyclical_component + random_component
+                # Combine components with emphasis on actual trends
+                change = effective_trend + scenario_influence + random_component * 0.5
+                
+                # Special handling for precipitation to add natural decay in normal weather
+                if param == 'precipitation' and current_scenario == 'normal' and pred_state[param] > 0:
+                    # Add natural decay for precipitation in normal weather (rain doesn't persist indefinitely)
+                    decay_rate = 0.85  # 15% decay per time step
+                    change *= decay_rate
                 
                 # Apply change without hard-coded limitations - let ML decide
                 new_value = pred_state[param] + change
@@ -1099,8 +1197,8 @@ class WeatherDashboard:
             # Physical bounds for relative humidity
             return np.clip(value, 0, 100)
         elif param == 'precipitation':
-            # Only prevent negative precipitation
-            return max(0, value)
+            # Prevent negative precipitation and cap at realistic maximum (15 mm/h is heavy rain)
+            return max(0, min(15, value))
         elif param == 'wind_speed':
             # Only prevent negative wind speed
             return max(0, value)
@@ -1279,116 +1377,185 @@ class WeatherDashboard:
         return f"⚠️ {weather_condition.replace('_', ' ').title()} conditions expected {timeframe}. Stay informed and take appropriate precautions."
     
     def _generate_extreme_weather_prediction(self, current_time, actual_data=None):
-        """Generate ML-based extreme weather prediction aligned with actual conditions."""
-        predictions = []
+        """Generate intelligent extreme weather prediction based on 1-hour data analysis."""
         
-        # Get centralized scenario information for consistency
-        scenario_info = self.get_current_scenario_info()
-        current_scenario = scenario_info['key']
+        # Initialize tracking for hourly data collection (12 realtime seconds = 1 hour)
+        collection_key = 'extreme_weather_data_collection'
+        if collection_key not in st.session_state:
+            st.session_state[collection_key] = {
+                'start_time': current_time,
+                'data_points': [],
+                'is_collecting': True
+            }
         
-        # Get recent weather trends from actual data
-        current_temp = 20  # Default
-        current_precip = 0
-        current_pressure = 1013
-        temp_trend = 0
-        precip_trend = 0
-        pressure_trend = 0
+        collection_state = st.session_state[collection_key]
         
-        if actual_data is not None and len(actual_data) > 0:
-            # Handle both DataFrame and list formats
-            if hasattr(actual_data, 'iloc'):  # DataFrame
-                latest_data = actual_data.iloc[-1].to_dict()
-                current_temp = latest_data.get('temperature', 20)
-                current_precip = latest_data.get('precipitation', 0)
-                current_pressure = latest_data.get('pressure', 1013)
-                
-                # Calculate trends from last 6 data points (30 minutes)
-                if len(actual_data) >= 6:
-                    recent_temps = actual_data['temperature'].tail(6).tolist()
-                    recent_precip = actual_data['precipitation'].tail(6).tolist()
-                    recent_pressure = actual_data['pressure'].tail(6).tolist()
-                    
-                    temp_trend = (recent_temps[-1] - recent_temps[0]) / 5  # Per 5-min interval
-                    precip_trend = (recent_precip[-1] - recent_precip[0]) / 5
-                    pressure_trend = (recent_pressure[-1] - recent_pressure[0]) / 5
-            else:  # List format
-                latest_data = actual_data[-1]
-                current_temp = latest_data.get('temperature', 20)
-                current_precip = latest_data.get('precipitation', 0)
-                current_pressure = latest_data.get('pressure', 1013)
-                
-                # Calculate trends from last 6 data points (30 minutes)
-                if len(actual_data) >= 6:
-                    recent_temps = [d.get('temperature', 20) for d in actual_data[-6:]]
-                    recent_precip = [d.get('precipitation', 0) for d in actual_data[-6:]]
-                    recent_pressure = [d.get('pressure', 1013) for d in actual_data[-6:]]
-                    
-                    temp_trend = (recent_temps[-1] - recent_temps[0]) / 5  # Per 5-min interval
-                    precip_trend = (recent_precip[-1] - recent_precip[0]) / 5
-                    pressure_trend = (recent_pressure[-1] - recent_pressure[0]) / 5
-        
-        # Determine most likely extreme weather based on current conditions and scenario
-        likely_event = None
-        base_confidence = 65
-        
-        # If we're actively in an emergency scenario, predict continuation/escalation
-        if current_scenario != 'normal':
-            if 'heat' in current_scenario.lower():
-                likely_event = 'heat_wave'
-                base_confidence = 80  # High confidence for active scenario
-            elif 'cold' in current_scenario.lower():
-                likely_event = 'extreme_cold'
-                base_confidence = 80
-            elif 'storm' in current_scenario.lower():
-                likely_event = 'severe_storm'
-                base_confidence = 80
-            elif 'flood' in current_scenario.lower():
-                likely_event = 'flash_flood'
-                base_confidence = 80
+        # Check if we need to start a new collection cycle
+        if hasattr(actual_data, 'iloc') and not actual_data.empty:
+            latest_data = actual_data.iloc[-1].to_dict()
+        elif actual_data and len(actual_data) > 0:
+            latest_data = actual_data[-1]
         else:
-            # Predict based on current conditions and trends
-            if current_temp > 30 or temp_trend > 0.5:
-                likely_event = 'heat_wave'
-                base_confidence = min(85, 60 + (current_temp - 25) * 2)
-            elif current_temp < 5 or temp_trend < -0.5:
-                likely_event = 'extreme_cold'
-                base_confidence = min(85, 60 + abs(current_temp - 5) * 2)
-            elif current_precip > 8 or precip_trend > 1:
-                likely_event = 'flash_flood'
-                base_confidence = min(85, 60 + current_precip * 2)
-            elif pressure_trend < -1 or current_pressure < 1005:
-                likely_event = 'severe_storm'
-                base_confidence = min(85, 60 + abs(pressure_trend) * 5)
+            latest_data = {'temperature': 20, 'precipitation': 0, 'pressure': 1013, 'humidity': 65, 'wind_speed': 8}
+        
+        # Add current data point to collection
+        if collection_state['is_collecting']:
+            collection_state['data_points'].append({
+                'timestamp': current_time,
+                'temperature': latest_data.get('temperature', 20),
+                'precipitation': latest_data.get('precipitation', 0),
+                'pressure': latest_data.get('pressure', 1013),
+                'humidity': latest_data.get('humidity', 65),
+                'wind_speed': latest_data.get('wind_speed', 8)
+            })
+            
+            # Keep only last hour of data (12 points for 1-hour simulation)
+            if len(collection_state['data_points']) > 12:
+                collection_state['data_points'] = collection_state['data_points'][-12:]
+        
+        # Analyze collected data if we have enough points (at least 6 = 30 minutes)
+        if len(collection_state['data_points']) >= 6:
+            data_points = collection_state['data_points']
+            
+            # Calculate trends and thresholds
+            temp_values = [p['temperature'] for p in data_points]
+            precip_values = [p['precipitation'] for p in data_points]
+            pressure_values = [p['pressure'] for p in data_points]
+            humidity_values = [p['humidity'] for p in data_points]
+            wind_values = [p['wind_speed'] for p in data_points]
+            
+            # Current conditions
+            current_temp = temp_values[-1]
+            current_precip = precip_values[-1]
+            current_pressure = pressure_values[-1]
+            current_humidity = humidity_values[-1]
+            current_wind = wind_values[-1]
+            
+            # Calculate trends (change per data point)
+            temp_trend = (temp_values[-1] - temp_values[0]) / len(temp_values)
+            precip_trend = (precip_values[-1] - precip_values[0]) / len(precip_values)
+            pressure_trend = (pressure_values[-1] - pressure_values[0]) / len(pressure_values)
+            
+            # Analyze for emergency thresholds
+            extreme_conditions = {}
+            
+            # Temperature analysis
+            if current_temp > 32:
+                extreme_conditions['heat_wave'] = {'severity': 'extreme', 'confidence': min(95, 70 + (current_temp - 32) * 3)}
+            elif current_temp > 28:
+                extreme_conditions['heat_wave'] = {'severity': 'high', 'confidence': min(85, 60 + (current_temp - 28) * 4)}
+            elif temp_trend > 1.5:
+                extreme_conditions['rising_temperature'] = {'severity': 'moderate', 'confidence': min(75, 50 + temp_trend * 10)}
+            
+            if current_temp < 0:
+                extreme_conditions['extreme_cold'] = {'severity': 'extreme', 'confidence': min(95, 70 + abs(current_temp) * 2)}
+            elif current_temp < 5:
+                extreme_conditions['extreme_cold'] = {'severity': 'high', 'confidence': min(85, 60 + (5 - current_temp) * 3)}
+            elif temp_trend < -1.0:
+                extreme_conditions['falling_temperature'] = {'severity': 'moderate', 'confidence': min(75, 50 + abs(temp_trend) * 10)}
+            
+            # Precipitation analysis
+            if current_precip > 12:
+                extreme_conditions['flash_flood'] = {'severity': 'extreme', 'confidence': min(95, 75 + (current_precip - 12) * 2)}
+            elif current_precip > 8:
+                extreme_conditions['flash_flood'] = {'severity': 'high', 'confidence': min(85, 65 + (current_precip - 8) * 3)}
+            elif precip_trend > 0.8:
+                extreme_conditions['increasing_precipitation'] = {'severity': 'moderate', 'confidence': min(75, 50 + precip_trend * 15)}
+            
+            # Pressure and wind analysis for storms
+            if current_pressure < 990 or pressure_trend < -1.5:
+                storm_confidence = min(90, 65 + abs(pressure_trend) * 5 + (1000 - current_pressure) * 0.5)
+                if current_wind > 40:
+                    extreme_conditions['severe_storm'] = {'severity': 'extreme', 'confidence': storm_confidence}
+                elif current_wind > 25:
+                    extreme_conditions['severe_storm'] = {'severity': 'high', 'confidence': storm_confidence - 10}
+                else:
+                    extreme_conditions['developing_storm'] = {'severity': 'moderate', 'confidence': storm_confidence - 20}
+            
+            # Humidity analysis
+            if current_humidity > 90 and temp_trend > 0.5:
+                extreme_conditions['high_humidity'] = {'severity': 'moderate', 'confidence': min(70, 50 + (current_humidity - 90) * 2)}
+            
+            # Determine the most significant condition
+            if extreme_conditions:
+                # Sort by confidence and severity
+                severity_weights = {'extreme': 3, 'high': 2, 'moderate': 1}
+                best_condition = max(extreme_conditions.items(), 
+                                   key=lambda x: x[1]['confidence'] + severity_weights.get(x[1]['severity'], 0) * 10)
+                
+                event_name, event_data = best_condition
+                
+                # Determine timeframe based on severity
+                if event_data['severity'] == 'extreme':
+                    timeframe = "within 6 hours"
+                    day_offset = 0.25
+                elif event_data['severity'] == 'high':
+                    timeframe = "within 12 hours"
+                    day_offset = 0.5
+                else:
+                    timeframe = "in 1-2 days"
+                    day_offset = 1.5
+                
+                prediction_time = current_time + timedelta(days=day_offset)
+                
+                return {
+                    'event': event_name,
+                    'severity': event_data['severity'],
+                    'confidence': event_data['confidence'],
+                    'timeframe': timeframe,
+                    'date': prediction_time.strftime('%Y-%m-%d %H:%M'),
+                    'probability': event_data['confidence']
+                }
             else:
-                # Default to moderate storm risk in 3-4 days
-                likely_event = 'severe_storm'
-                base_confidence = 65
-        
-        # Generate prediction for most likely timeframe (1-4 days based on scenario)
-        if current_scenario != 'normal':
-            # Active emergency - predict near-term escalation
-            day_offset = 1
-            confidence = min(95, base_confidence + 10)
-            severity = 'extreme'
+                # No extreme conditions detected - provide moderate forecast
+                moderate_predictions = []
+                
+                if temp_trend > 0.2:
+                    moderate_predictions.append("temperatures will continue to rise")
+                elif temp_trend < -0.2:
+                    moderate_predictions.append("temperatures will continue to fall")
+                
+                if precip_trend > 0.1:
+                    moderate_predictions.append("precipitation levels may increase")
+                
+                if pressure_trend < -0.5:
+                    moderate_predictions.append("atmospheric pressure is dropping")
+                
+                if current_humidity > 80:
+                    moderate_predictions.append("high humidity levels expected")
+                
+                if moderate_predictions:
+                    prediction_text = ", ".join(moderate_predictions)
+                    return {
+                        'event': 'moderate_changes',
+                        'severity': 'low',
+                        'confidence': 65,
+                        'timeframe': "in the next 24 hours",
+                        'date': (current_time + timedelta(days=1)).strftime('%Y-%m-%d'),
+                        'probability': 65,
+                        'description': prediction_text
+                    }
+                else:
+                    return {
+                        'event': 'stable_conditions',
+                        'severity': 'low',
+                        'confidence': 70,
+                        'timeframe': "continuing",
+                        'date': current_time.strftime('%Y-%m-%d'),
+                        'probability': 70,
+                        'description': "weather conditions expected to remain stable"
+                    }
         else:
-            # Normal conditions - predict medium-term risk
-            day_offset = int(np.random.choice([2, 3, 4], p=[0.4, 0.4, 0.2]))  # Favor 2-3 days
-            confidence = base_confidence + np.random.randint(-10, 15)
-            confidence = max(60, min(90, confidence))
-            severity = 'extreme' if confidence > 80 else 'high'
-        
-        prediction_time = current_time + timedelta(days=day_offset)
-        
-        prediction = {
-            'event': likely_event,
-            'severity': severity,
-            'confidence': confidence,
-            'timeframe': f"in {day_offset} day{'s' if day_offset > 1 else ''}",
-            'date': prediction_time.strftime('%Y-%m-%d'),
-            'probability': min(95, confidence + int(np.random.randint(-5, 10)))
-        }
-        
-        return prediction
+            # Not enough data yet - return collecting status
+            return {
+                'event': 'data_collection',
+                'severity': 'info',
+                'confidence': 0,
+                'timeframe': f"collecting data... ({len(collection_state['data_points'])}/12 points)",
+                'date': current_time.strftime('%Y-%m-%d'),
+                'probability': 0,
+                'description': "analyzing weather patterns for accurate prediction"
+            }
     
     def _ensure_historical_data_exists(self, scenario_name, current_sim_time):
         """Generate fixed historical data that never changes once created."""
@@ -1788,7 +1955,7 @@ class WeatherDashboard:
         return smoothed_data
     
     def create_weather_charts(self, data):
-        """Create interactive weather visualization charts with prediction overlay."""
+        """Create interactive weather visualization charts with prediction overlay and UX controls."""
         if data is None or data.empty:
             st.warning("⚠️ No data available for charts")
             return
@@ -1800,6 +1967,22 @@ class WeatherDashboard:
             pass
         st.session_state.last_chart_hash = data_hash
         
+        # Optional chart controls
+        with st.expander("Chart options", expanded=False):
+            col_o1, col_o2, col_o3 = st.columns(3)
+            with col_o1:
+                show_past_pred = st.toggle("Show past predictions", value=True, help="Display previous forecast runs for comparison")
+            with col_o2:
+                hover_unified = st.toggle("Unified hover", value=True, help="Show one shared tooltip across subplots aligned by time")
+            with col_o3:
+                show_spikes = st.toggle("Time spikelines", value=True, help="Vertical crosshair that follows your cursor")
+        
+        # Optional: include generation time in hover for past predictions when available
+        show_gen_time = False
+        if 'stored_predictions' in st.session_state and st.session_state.stored_predictions:
+            with st.expander("Forecast run info", expanded=False):
+                show_gen_time = st.toggle("Show generation time in past predictions hover", value=False)
+        
         # Prepare data
         data['timestamp'] = pd.to_datetime(data['timestamp'])
         data = data.sort_values('timestamp')
@@ -1808,6 +1991,17 @@ class WeatherDashboard:
         actual_data = data[data['data_type'] == 'actual'].copy() if 'data_type' in data.columns else data.copy()
         prediction_data = data[data['data_type'] == 'prediction'].copy() if 'data_type' in data.columns else pd.DataFrame()
         old_prediction_data = data[data['data_type'] == 'old_prediction'].copy() if 'data_type' in data.columns else pd.DataFrame()
+        
+        # Debug: Check data availability
+        if 'data_type' in data.columns:
+            data_types = data['data_type'].value_counts().to_dict()
+            # st.write(f"DEBUG - Data types available: {data_types}")  # Uncomment for debugging
+            if prediction_data.empty:
+                # st.write("DEBUG - No prediction data found")  # Uncomment for debugging
+                pass
+            if old_prediction_data.empty:
+                # st.write("DEBUG - No old prediction data found")  # Uncomment for debugging  
+                pass
         
         # Apply consistent normalization to both actual and prediction data for continuity
         if not actual_data.empty:
@@ -1831,7 +2025,22 @@ class WeatherDashboard:
             prediction_data = self._normalize_prediction_data(prediction_data, interval_minutes=15)
         
         if not old_prediction_data.empty:
-            old_prediction_data = self._normalize_prediction_data(old_prediction_data, interval_minutes=15)
+            # Try to attach generation time for hover if available in stored_predictions
+            gen_map = {}
+            try:
+                for k, v in st.session_state.get('stored_predictions', {}).items():
+                    if isinstance(v, dict) and 'generated_at' in v and 'predictions' in v:
+                        gen_at = pd.to_datetime(v['generated_at']) if v['generated_at'] is not None else None
+                        for p in v['predictions']:
+                            ts = pd.to_datetime(p.get('timestamp'))
+                            if ts is not None and gen_at is not None:
+                                gen_map[ts] = gen_at
+            except Exception:
+                gen_map = {}
+
+            if gen_map:
+                old_prediction_data['gen_time'] = old_prediction_data['timestamp'].map(gen_map)
+            # Don't normalize old predictions - show them as they were originally predicted
         
         # Create subplots
         fig = make_subplots(
@@ -1846,9 +2055,26 @@ class WeatherDashboard:
                 [{"secondary_y": False}, {"secondary_y": False}],
                 [{"secondary_y": False}, {"secondary_y": False}]
             ],
-            vertical_spacing=0.12
+            vertical_spacing=0.12,
+            row_heights=[0.38, 0.32, 0.30]
         )
         
+        # Common hover templates with units
+        ht_temp = "Time: %{x|%Y-%m-%d %H:%M}<br>Temperature: %{y:.1f} °C<extra>%{fullData.name}</extra>"
+        ht_hum = "Time: %{x|%Y-%m-%d %H:%M}<br>Humidity: %{y:.0f}%<extra>%{fullData.name}</extra>"
+        ht_wind = "Time: %{x|%Y-%m-%d %H:%M}<br>Wind: %{y:.1f} km/h<extra>%{fullData.name}</extra>"
+        ht_prec = "Time: %{x|%Y-%m-%d %H:%M}<br>Precipitation: %{y:.2f} mm/h<extra>%{fullData.name}</extra>"
+        ht_press = "Time: %{x|%Y-%m-%d %H:%M}<br>Pressure: %{y:.0f} hPa<extra>%{fullData.name}</extra>"
+        ht_vis = "Time: %{x|%Y-%m-%d %H:%M}<br>Visibility: %{y:.1f} km<extra>%{fullData.name}</extra>"
+
+        # Legend grouping so toggling affects both actual/predicted across subplots
+        lg_temp = "temperature"
+        lg_hum = "humidity"
+        lg_wind = "wind"
+        lg_prec = "precip"
+        lg_press = "pressure"
+        lg_vis = "visibility"
+
         # Temperature - Actual Data (Solid Line)
         if not actual_data.empty:
             fig.add_trace(
@@ -1858,7 +2084,10 @@ class WeatherDashboard:
                     mode='lines+markers',
                     name='Temperature (Actual)',
                     line=dict(color='#ff6b6b', width=3),
-                    marker=dict(size=6)
+                    marker=dict(size=6),
+                    hovertemplate=ht_temp,
+                    connectgaps=True,
+                    legendgroup=lg_temp
                 ),
                 row=1, col=1
             )
@@ -1872,13 +2101,16 @@ class WeatherDashboard:
                     mode='lines',
                     name='Temperature (Predicted)',
                     line=dict(color='#ff6b6b', width=2, dash='dash'),
-                    opacity=0.7
+                    opacity=0.7,
+                    hovertemplate=ht_temp,
+                    connectgaps=True,
+                    legendgroup=lg_temp
                 ),
                 row=1, col=1
             )
         
         # Temperature - Old Predictions (Dotted Line for comparison)
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Scatter(
                     x=old_prediction_data['timestamp'],
@@ -1886,7 +2118,11 @@ class WeatherDashboard:
                     mode='lines',
                     name='Temperature (Past Prediction)',
                     line=dict(color='#ff6b6b', width=1, dash='dot'),
-                    opacity=0.5
+                    opacity=0.5,
+                    hovertemplate=(ht_temp + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_temp,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    connectgaps=True,
+                    legendgroup=lg_temp
                 ),
                 row=1, col=1
             )
@@ -1899,7 +2135,10 @@ class WeatherDashboard:
                     y=actual_data['humidity'],
                     mode='lines',
                     name='Humidity % (Actual)',
-                    line=dict(color='#4ecdc4', width=3)
+                    line=dict(color='#4ecdc4', width=3),
+                    hovertemplate=ht_hum,
+                    connectgaps=True,
+                    legendgroup=lg_hum
                 ),
                 row=1, col=2
             )
@@ -1913,13 +2152,16 @@ class WeatherDashboard:
                     mode='lines',
                     name='Humidity % (Predicted)',
                     line=dict(color='#4ecdc4', width=2, dash='dash'),
-                    opacity=0.6
+                    opacity=0.6,
+                    hovertemplate=ht_hum,
+                    connectgaps=True,
+                    legendgroup=lg_hum
                 ),
                 row=1, col=2
             )
         
         # Humidity - Old Predictions
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Scatter(
                     x=old_prediction_data['timestamp'],
@@ -1927,7 +2169,11 @@ class WeatherDashboard:
                     mode='lines',
                     name='Humidity % (Past Prediction)',
                     line=dict(color='#4ecdc4', width=1, dash='dot'),
-                    opacity=0.4
+                    opacity=0.4,
+                    hovertemplate=(ht_hum + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_hum,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    connectgaps=True,
+                    legendgroup=lg_hum
                 ),
                 row=1, col=2
             )
@@ -1940,7 +2186,9 @@ class WeatherDashboard:
                     y=actual_data['precipitation'],
                     name='Precipitation (Actual)',
                     marker_color='#45b7d1',
-                    opacity=0.8
+                    opacity=0.8,
+                    hovertemplate=ht_prec,
+                    legendgroup=lg_prec
                 ),
                 row=2, col=2
             )
@@ -1953,20 +2201,25 @@ class WeatherDashboard:
                     y=prediction_data['precipitation'],
                     name='Precipitation (Predicted)',
                     marker_color='#45b7d1',
-                    opacity=0.4
+                    opacity=0.4,
+                    hovertemplate=ht_prec,
+                    legendgroup=lg_prec
                 ),
                 row=2, col=2
             )
         
         # Precipitation - Old Predictions
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Bar(
                     x=old_prediction_data['timestamp'],
                     y=old_prediction_data['precipitation'],
                     name='Precipitation (Past Prediction)',
                     marker_color='#45b7d1',
-                    opacity=0.2
+                    opacity=0.2,
+                    hovertemplate=(ht_prec + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_prec,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    legendgroup=lg_prec
                 ),
                 row=2, col=2
             )
@@ -1980,7 +2233,10 @@ class WeatherDashboard:
                     mode='lines+markers',
                     name='Wind Speed (Actual)',
                     line=dict(color='#96ceb4', width=3),
-                    fill='tonexty'
+                    fill='tonexty',
+                    hovertemplate=ht_wind,
+                    connectgaps=True,
+                    legendgroup=lg_wind
                 ),
                 row=2, col=1
             )
@@ -1994,13 +2250,16 @@ class WeatherDashboard:
                     mode='lines',
                     name='Wind Speed (Predicted)',
                     line=dict(color='#96ceb4', width=2, dash='dash'),
-                    opacity=0.6
+                    opacity=0.6,
+                    hovertemplate=ht_wind,
+                    connectgaps=True,
+                    legendgroup=lg_wind
                 ),
                 row=2, col=1
             )
         
         # Wind Speed - Old Predictions
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Scatter(
                     x=old_prediction_data['timestamp'],
@@ -2008,7 +2267,11 @@ class WeatherDashboard:
                     mode='lines',
                     name='Wind Speed (Past Prediction)',
                     line=dict(color='#96ceb4', width=1, dash='dot'),
-                    opacity=0.4
+                    opacity=0.4,
+                    hovertemplate=(ht_wind + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_wind,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    connectgaps=True,
+                    legendgroup=lg_wind
                 ),
                 row=2, col=1
             )
@@ -2021,7 +2284,10 @@ class WeatherDashboard:
                     y=actual_data['pressure'],
                     mode='lines+markers',
                     name='Pressure (Actual)',
-                    line=dict(color='#feca57', width=3)
+                    line=dict(color='#feca57', width=3),
+                    hovertemplate=ht_press,
+                    connectgaps=True,
+                    legendgroup=lg_press
                 ),
                 row=3, col=1
             )
@@ -2035,13 +2301,16 @@ class WeatherDashboard:
                     mode='lines',
                     name='Pressure (Predicted)',
                     line=dict(color='#feca57', width=2, dash='dash'),
-                    opacity=0.6
+                    opacity=0.6,
+                    hovertemplate=ht_press,
+                    connectgaps=True,
+                    legendgroup=lg_press
                 ),
                 row=3, col=1
             )
         
         # Atmospheric Pressure - Old Predictions
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Scatter(
                     x=old_prediction_data['timestamp'],
@@ -2049,7 +2318,11 @@ class WeatherDashboard:
                     mode='lines',
                     name='Pressure (Past Prediction)',
                     line=dict(color='#feca57', width=1, dash='dot'),
-                    opacity=0.4
+                    opacity=0.4,
+                    hovertemplate=(ht_press + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_press,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    connectgaps=True,
+                    legendgroup=lg_press
                 ),
                 row=3, col=1
             )
@@ -2062,7 +2335,10 @@ class WeatherDashboard:
                     y=actual_data['visibility'],
                     mode='lines+markers',
                     name='Visibility (Actual)',
-                    line=dict(color='#ff9ff3', width=2)
+                    line=dict(color='#ff9ff3', width=2),
+                    hovertemplate=ht_vis,
+                    connectgaps=True,
+                    legendgroup=lg_vis
                 ),
                 row=3, col=2
             )
@@ -2076,13 +2352,16 @@ class WeatherDashboard:
                     mode='lines',
                     name='Visibility (Predicted)',
                     line=dict(color='#ff9ff3', width=2, dash='dash'),
-                    opacity=0.6
+                    opacity=0.6,
+                    hovertemplate=ht_vis,
+                    connectgaps=True,
+                    legendgroup=lg_vis
                 ),
                 row=3, col=2
             )
         
         # Visibility - Old Predictions
-        if not old_prediction_data.empty:
+        if show_past_pred and not old_prediction_data.empty:
             fig.add_trace(
                 go.Scatter(
                     x=old_prediction_data['timestamp'],
@@ -2090,28 +2369,56 @@ class WeatherDashboard:
                     mode='lines',
                     name='Visibility (Past Prediction)',
                     line=dict(color='#ff9ff3', width=1, dash='dot'),
-                    opacity=0.4
+                    opacity=0.4,
+                    hovertemplate=(ht_vis + "<br>Gen: %{customdata[0]}") if show_gen_time and 'gen_time' in old_prediction_data.columns else ht_vis,
+                    customdata=(np.c_[old_prediction_data['gen_time'].astype(str)]) if show_gen_time and 'gen_time' in old_prediction_data.columns else None,
+                    connectgaps=True,
+                    legendgroup=lg_vis
                 ),
                 row=3, col=2
             )
         
 
         
-        # Add vertical line to separate actual from predicted data
+        # Add vertical line to separate actual from predicted data to all subplots
         if not actual_data.empty and not prediction_data.empty:
             current_time = actual_data['timestamp'].iloc[-1]
-            # Use add_shape instead of add_vline for better timestamp compatibility
-            fig.add_shape(
-                type="line",
-                x0=current_time,
-                x1=current_time,
-                y0=0,
-                y1=1,
-                yref="paper",
-                line=dict(color="red", width=2, dash="dot"),
-                opacity=0.7
-            )
-            # Add annotation for the current time line
+            
+            # Add current time line to each subplot (3x2 grid)
+            for row in range(1, 4):  # rows 1, 2, 3
+                for col in range(1, 3):  # cols 1, 2
+                    fig.add_shape(
+                        type="line",
+                        x0=current_time,
+                        x1=current_time,
+                        y0=0,
+                        y1=1,
+                        yref=f"y{'' if row == 1 and col == 1 else (row-1)*2 + col} domain",
+                        line=dict(color="red", width=2, dash="dot"),
+                        opacity=0.7,
+                        row=row,
+                        col=col
+                    )
+            
+            # Forecast shading area across the whole figure for the prediction window
+            try:
+                x_end = prediction_data['timestamp'].max()
+                fig.add_shape(
+                    type="rect",
+                    x0=current_time,
+                    x1=x_end,
+                    xref="x",
+                    y0=0,
+                    y1=1,
+                    yref="paper",
+                    fillcolor="rgba(255,0,0,0.05)",
+                    line=dict(width=0),
+                    layer="below"
+                )
+            except Exception:
+                pass
+
+            # Add annotation for the current time line (only once at the top)
             fig.add_annotation(
                 x=current_time,
                 y=1.02,
@@ -2127,20 +2434,52 @@ class WeatherDashboard:
             height=1000,
             showlegend=True,
             title_text="📊 Weather Analysis: Actual Data vs Predictions",
-            title_font_size=20
+            title_font_size=20,
+            template="plotly_white",
+            hovermode="x unified" if hover_unified else "closest",
+            legend=dict(groupclick="togglegroup"),
+            font=dict(size=12)
         )
         
-        # Update axes labels
+        # Update axes labels and set baseline ranges
         fig.update_xaxes(title_text="Time", row=3, col=1)
         fig.update_xaxes(title_text="Time", row=3, col=2)
-        fig.update_yaxes(title_text="°C", row=1, col=1)
-        fig.update_yaxes(title_text="%", row=1, col=2)
-        fig.update_yaxes(title_text="km/h", row=2, col=1)
-        fig.update_yaxes(title_text="mm/h", row=2, col=2)
-        fig.update_yaxes(title_text="hPa", row=3, col=1)
-        fig.update_yaxes(title_text="km", row=3, col=2)
         
-        st.plotly_chart(fig, use_container_width=True)
+        # Configure x-axes: keep spikelines only (no range slider or selectors)
+        for ax in [1, 2, 3, 4, 5, 6]:
+            fig.update_xaxes(
+                showspikes=show_spikes,
+                spikemode="across",
+                spikesnap="cursor",
+                spikedash="dot",
+                spikecolor="rgba(150,150,150,0.6)",
+                spikethickness=1,
+                row=((ax - 1) // 2) + 1,
+                col=((ax - 1) % 2) + 1,
+            )
+        
+        # Calculate data ranges for intelligent scaling
+        temp_max = max(data['temperature'].max(), prediction_data['temperature'].max()) if not prediction_data.empty else data['temperature'].max()
+        humidity_max = max(data['humidity'].max(), prediction_data['humidity'].max()) if not prediction_data.empty else data['humidity'].max()
+        wind_max = max(data['wind_speed'].max(), prediction_data['wind_speed'].max()) if not prediction_data.empty else data['wind_speed'].max()
+        precip_max = max(data['precipitation'].max(), prediction_data['precipitation'].max()) if not prediction_data.empty else data['precipitation'].max()
+        pressure_min = min(data['pressure'].min(), prediction_data['pressure'].min() if not prediction_data.empty else data['pressure'].min())
+        pressure_max = max(data['pressure'].max(), prediction_data['pressure'].max()) if not prediction_data.empty else data['pressure'].max()
+        visibility_max = max(data['visibility'].max(), prediction_data['visibility'].max()) if not prediction_data.empty else data['visibility'].max()
+        
+        # Set y-axes with baseline starting points and appropriate ranges
+        fig.update_yaxes(title_text="°C", range=[0, max(temp_max * 1.1, 30)], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=1, col=1)  # Temperature from 0°C
+        fig.update_yaxes(title_text="%", range=[0, 100], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=1, col=2)  # Humidity 0-100%
+        fig.update_yaxes(title_text="km/h", range=[0, max(wind_max * 1.2, 50)], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=2, col=1)  # Wind speed from 0
+        fig.update_yaxes(title_text="mm/h", range=[0, max(precip_max * 1.2, 10)], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=2, col=2)  # Precipitation from 0
+        fig.update_yaxes(title_text="hPa", range=[max(950, pressure_min * 0.99), pressure_max * 1.01], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=3, col=1)  # Pressure (reasonable meteorological range)
+        fig.update_yaxes(title_text="km", range=[0, max(visibility_max * 1.1, 20)], showgrid=True, gridcolor="rgba(0,0,0,0.05)", row=3, col=2)  # Visibility from 0
+        
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            config=dict(displaylogo=False, scrollZoom=True)
+        )
     
     def render_alerts_panel(self, data=None):
         """Render smart emergency alerts panel based on actual weather conditions."""
@@ -2272,15 +2611,15 @@ class WeatherDashboard:
         if data is None or len(data) < 3:
             return []
         
-        # Stable prediction caching to prevent rapid changes
+        # Minimal caching to allow responsive predictions
         current_time = datetime.now()
         cache_key = f"predictions_{st.session_state.get('current_scenario', 'normal')}"
         
-        # Check if we have cached predictions that are still valid (5 minutes)
+        # Check if we have cached predictions that are still valid (30 seconds only)
         if cache_key in st.session_state:
             cached_time, cached_predictions = st.session_state[cache_key]
             time_diff = (current_time - cached_time).total_seconds()
-            if time_diff < 300:  # 5 minutes cache
+            if time_diff < 30:  # 30 seconds cache instead of 5 minutes
                 return cached_predictions
         
         # Convert to DataFrame if it's a list
@@ -2655,13 +2994,14 @@ class WeatherDashboard:
         
         # Display extreme weather forecast
         if extreme_prediction:
-            st.markdown("### ⚠️ Extended Extreme Weather Forecast")
             
             severity_colors = {
                 'extreme': '#dc3545',
                 'high': '#fd7e14',
                 'medium': '#ffc107',
-                'low': '#28a745'
+                'moderate': '#ffc107',
+                'low': '#28a745',
+                'info': '#17a2b8'
             }
             
             color = severity_colors.get(extreme_prediction['severity'], '#fd7e14')
@@ -2669,19 +3009,41 @@ class WeatherDashboard:
                 'heat_wave': '🔥',
                 'severe_storm': '⛈️',
                 'flash_flood': '🌊',
-                'extreme_cold': '❄️'
+                'extreme_cold': '❄️',
+                'rising_temperature': '🌡️↗️',
+                'falling_temperature': '🌡️↘️',
+                'increasing_precipitation': '🌧️↗️',
+                'developing_storm': '⛈️⚠️',
+                'high_humidity': '💨',
+                'moderate_changes': '📊',
+                'stable_conditions': '✅',
+                'data_collection': '📊'
             }
             
             icon = event_icons.get(extreme_prediction['event'], '⚠️')
-            event_name = extreme_prediction['event'].replace('_', ' ').title()
             
-            # Get personalized advice
-            personalized_advice = self._get_personalized_weather_advice(
-                user_background,
-                extreme_prediction['event'],
-                extreme_prediction['severity'],
-                extreme_prediction['timeframe']
-            )
+            # Handle special display names
+            if extreme_prediction['event'] == 'data_collection':
+                event_name = 'Analyzing Weather Patterns'
+            elif extreme_prediction['event'] == 'moderate_changes':
+                event_name = extreme_prediction.get('description', 'Weather Changes Expected').title()
+            elif extreme_prediction['event'] == 'stable_conditions':
+                event_name = 'Stable Weather Conditions'
+            else:
+                event_name = extreme_prediction['event'].replace('_', ' ').title()
+            
+            # Get personalized advice (skip for data collection and use description if available)
+            if extreme_prediction['event'] == 'data_collection':
+                personalized_advice = extreme_prediction.get('description', 'Collecting weather data for analysis...')
+            elif 'description' in extreme_prediction:
+                personalized_advice = extreme_prediction['description']
+            else:
+                personalized_advice = self._get_personalized_weather_advice(
+                    user_background,
+                    extreme_prediction['event'],
+                    extreme_prediction['severity'],
+                    extreme_prediction['timeframe']
+                )
             
             forecast_html = f"""
             <div style="

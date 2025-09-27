@@ -1,21 +1,4 @@
 #!/usr/bin/env python3
-"""
-Swiss Weather Anomaly Detection System
-======================================
-
-Advanced anomaly detection for Swiss meteorological data to predict
-extreme weather events and build resilience against climate risks.
-
-Features:
-- Statistical anomaly detection using Isolation Forest and Z-scores
-- Change point detection for abrupt parameter shifts
-- Time series trend analysis and seasonal decomposition
-- Early warning system for extreme weather conditions
-- Interactive visualizations and alerts
-
-Author: EPFL Hackathon Team
-Date: September 2025
-"""
 
 import pandas as pd
 import numpy as np
