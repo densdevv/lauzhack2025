@@ -2,7 +2,16 @@
 
 ## Installation
 - Simply run the start_app.bat file. The program will install all necessary libraries then start a localhost server.
-- You can also find detailed instructions in the WEB_APP_README.md file within the folder.
+- Manual (PowerShell)
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m streamlit run weather_app.py
+```
+
+- First installation takes around 4-5 minutes to download and install all necessary libraries.
+- Once launched, please allow the app a few seconds to gather data and start predictions.
 
 ## Key Features
 - Weather parameters (temperature, atmospheric pressure, precipitation, etc.) predictions based on previous data

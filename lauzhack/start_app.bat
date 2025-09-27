@@ -15,6 +15,10 @@ echo ================================================================
 echo.
 echo Starting Advanced Weather Intelligence Web Application...
 echo.
+echo [Diagnostics]
+echo   Working dir: %CD%
+echo   Script dir : %~dp0
+echo.
 
 REM Detect Python (prefer python, fallback to py -3)
 set "PY_CMD="
@@ -29,7 +33,7 @@ if not defined PY_CMD (
     exit /b 1
 )
 
-echo 🔧 Checking Python virtual environment...
+echo Checking Python virtual environment...
 if not exist ".venv\Scripts\python.exe" (
     echo Creating virtual environment in .venv ...
     %PY_CMD% -m venv ".venv"
@@ -47,8 +51,13 @@ if not exist "%VENV_PY%" (
 )
 
 echo.
-echo 📦 Installing required dependencies (requirements.txt)...
-"%VENV_PY%" -m pip install --upgrade pip 1>nul
+echo Python info:
+"%VENV_PY%" --version
+"%VENV_PY%" -c "import sys; print('Executable:', sys.executable)"
+
+echo.
+echo Installing required dependencies (requirements.txt)...
+"%VENV_PY%" -m pip install --upgrade pip
 if exist "requirements.txt" (
     "%VENV_PIP%" install -r requirements.txt
 )
@@ -66,15 +75,32 @@ echo Press Ctrl+C to stop the application
 echo ================================================================
 echo.
 
-if exist "%VENV_STREAMLIT%" (
-    "%VENV_STREAMLIT%" run weather_app.py --server.headless false --server.port 8501 --server.address localhost
-) else (
-    "%VENV_PY%" -m streamlit run weather_app.py --server.headless false --server.port 8501 --server.address localhost
+REM Always prefer module invocation to ensure consistent environment
+set PORT=8501
+
+REM Try to let Streamlit pick a free port if 8501 is in use
+for /f "usebackq delims=" %%p in (`"%VENV_PY%" -c "import socket; p=8501; s=socket.socket(); s.settimeout(0.2); used = s.connect_ex(('127.0.0.1',p))==0; s.close(); print(0 if used else p)"`) do set PORT=%%p
+
+echo.
+echo Launching Streamlit (URL will be shown below)...
+REM Let Streamlit pick a free port automatically
+set PORT=0
+"%VENV_PY%" -m streamlit run weather_app.py --server.headless false --server.port %PORT% --server.address localhost
+set "EXITCODE=%errorlevel%"
+
+if not "%EXITCODE%"=="0" (
+    echo.
+    echo [ERROR] Streamlit exited with code %EXITCODE%.
+    echo If you saw an error above, please share it. This window will stay open.
+    echo Press any key to exit.
+    pause >nul
+    popd 1>nul 2>nul
+    endlocal & exit /b %EXITCODE%
 )
 
 echo.
-echo Application stopped. Press any key to exit...
-pause
+echo Application stopped normally. Press any key to exit...
+pause >nul
 
 popd 1>nul 2>nul
-endlocal
+endlocal & exit /b 0
