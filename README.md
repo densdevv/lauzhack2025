@@ -1,6 +1,7 @@
 ## Also accessible publicly here: https://bias-and-variance.streamlit.app/
 
 ## Installation
+*Important: Make sure to have Python installed before running!* 
 - Simply run the start_app.bat file. The program will install all necessary libraries then start a localhost server.
 - Manual (PowerShell)
 ```powershell
