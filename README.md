@@ -2,7 +2,7 @@
 
 ## Installation
 *Important: Make sure to have Python installed before running!* 
-- Simply run the start_app.bat file. The program will install all necessary libraries then start a localhost server.
+- Simply run the start_app.bat file in the lauzhack folder. The program will install all necessary libraries then start a localhost server. (localhost:8501 as default)
 - Manual (PowerShell)
 ```powershell
 python -m venv .venv
